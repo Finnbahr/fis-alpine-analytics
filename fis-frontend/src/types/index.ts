@@ -115,3 +115,66 @@ export interface PaginationMeta {
   offset: number;
   has_more: boolean;
 }
+
+// Strokes Gained Types
+export interface StrokesGainedItem {
+  race_id: number;
+  date: string;
+  location: string;
+  country?: string;
+  discipline: string;
+  rank?: string;
+  strokes_gained?: number;
+  strokes_gained_percentile?: number;
+}
+
+export interface StrokesGainedResponse {
+  data: StrokesGainedItem[];
+}
+
+// Bib-Relative Performance Types
+export interface StrokesGainedBibItem {
+  race_id: number;
+  date: string;
+  location: string;
+  discipline: string;
+  bib?: number;
+  rank?: string;
+  expected_rank?: number;
+  bib_advantage?: number;
+}
+
+export interface StrokesGainedBibResponse {
+  data: StrokesGainedBibItem[];
+}
+
+// Regression Analysis Types
+export interface RegressionCoefficient {
+  characteristic: string;
+  coefficient?: number;
+  std_error?: number;
+  p_value?: number;
+  r_squared?: number;
+}
+
+export interface RegressionResponse {
+  fis_code: string;
+  discipline: string;
+  data: RegressionCoefficient[];
+}
+
+// Course Traits Types
+export interface CourseTraitQuintileItem {
+  trait: string;
+  quintile: number;
+  quintile_label: string;
+  race_count: number;
+  avg_z_score?: number;
+  avg_rank?: number;
+}
+
+export interface CourseTraitResponse {
+  fis_code: string;
+  discipline?: string;
+  data: CourseTraitQuintileItem[];
+}

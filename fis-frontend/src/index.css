@@ -4,24 +4,86 @@
 
 @layer base {
   body {
-    @apply bg-gray-50 text-gray-900 min-h-screen;
+    @apply bg-gray-950 text-gray-100 min-h-screen antialiased;
   }
 }
 
 @layer components {
+  /* Buttons */
   .btn-primary {
-    @apply px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors font-medium;
+    @apply px-4 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors font-medium shadow-lg shadow-primary-500/20;
   }
 
   .btn-secondary {
-    @apply px-4 py-2 bg-gray-200 text-gray-900 rounded-lg hover:bg-gray-300 transition-colors font-medium;
+    @apply px-4 py-2 bg-gray-800 text-gray-100 rounded-lg hover:bg-gray-700 transition-colors font-medium border border-gray-700;
   }
 
+  /* Cards */
   .card {
-    @apply bg-white rounded-lg shadow-md p-6;
+    @apply bg-gray-900 rounded-lg shadow-xl border border-gray-800 p-6;
   }
 
+  .card-hover {
+    @apply card hover:border-primary-500/50 hover:shadow-primary-500/10 transition-all duration-300;
+  }
+
+  .glass-card {
+    @apply bg-gray-900/80 backdrop-blur-sm rounded-lg shadow-xl border border-gray-800/50 p-6;
+  }
+
+  /* Inputs */
   .input {
-    @apply px-4 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-transparent w-full;
+    @apply px-4 py-2 bg-gray-800 border border-gray-700 text-gray-100 rounded-lg focus:outline-none focus:ring-2 focus:ring-primary-500 focus:border-primary-500 w-full placeholder-gray-500;
+  }
+
+  /* Stats */
+  .stat-positive {
+    @apply text-emerald-400;
+  }
+
+  .stat-negative {
+    @apply text-red-400;
+  }
+
+  .stat-neutral {
+    @apply text-gray-400;
+  }
+
+  /* Badges */
+  .badge {
+    @apply inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium;
+  }
+
+  .badge-primary {
+    @apply badge bg-primary-500/20 text-primary-400 border border-primary-500/30;
+  }
+
+  .badge-positive {
+    @apply badge bg-emerald-500/20 text-emerald-400 border border-emerald-500/30;
+  }
+
+  .badge-negative {
+    @apply badge bg-red-500/20 text-red-400 border border-red-500/30;
+  }
+
+  /* Tables */
+  .table-dark {
+    @apply w-full text-left;
+  }
+
+  .table-dark thead {
+    @apply bg-gray-800 border-b border-gray-700;
+  }
+
+  .table-dark th {
+    @apply px-4 py-3 text-xs font-medium text-gray-400 uppercase tracking-wider;
+  }
+
+  .table-dark tbody tr {
+    @apply border-b border-gray-800 hover:bg-gray-800/50 transition-colors;
+  }
+
+  .table-dark td {
+    @apply px-4 py-3 text-sm text-gray-300;
   }
 }
