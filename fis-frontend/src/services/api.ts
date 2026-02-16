@@ -56,6 +56,38 @@ export const getAthleteCourses = async (
   return response.data;
 };
 
+export const getAthleteStrokesGained = async (
+  fisCode: string,
+  params?: { discipline?: string; limit?: number }
+) => {
+  const response = await apiClient.get(`/athletes/${fisCode}/strokes-gained`, { params });
+  return response.data;
+};
+
+export const getAthleteStrokesGainedBib = async (
+  fisCode: string,
+  params?: { discipline?: string; limit?: number }
+) => {
+  const response = await apiClient.get(`/athletes/${fisCode}/strokes-gained-bib`, { params });
+  return response.data;
+};
+
+export const getAthleteRegression = async (
+  fisCode: string,
+  params?: { discipline?: string }
+) => {
+  const response = await apiClient.get(`/athletes/${fisCode}/regression`, { params });
+  return response.data;
+};
+
+export const getAthleteCourseTraits = async (
+  fisCode: string,
+  params?: { discipline?: string }
+) => {
+  const response = await apiClient.get(`/athletes/${fisCode}/course-traits`, { params });
+  return response.data;
+};
+
 // ========== Races ==========
 
 export const getRaces = async (params?: {
