@@ -20,6 +20,14 @@ from app.models import (
     MomentumDataPoint,
     CoursePerformanceResponse,
     CoursePerformanceItem,
+    StrokesGainedResponse,
+    StrokesGainedItem,
+    StrokesGainedBibResponse,
+    StrokesGainedBibItem,
+    RegressionResponse,
+    RegressionCoefficient,
+    CourseTraitResponse,
+    CourseTraitQuintileItem,
     PaginationMeta,
 )
 
@@ -408,3 +416,256 @@ def get_athlete_courses(
     ]
 
     return CoursePerformanceResponse(data=courses)
+
+
+@router.get("/athletes/{fis_code}/strokes-gained", response_model=StrokesGainedResponse)
+def get_athlete_strokes_gained(
+    fis_code: str = Path(..., description="FIS athlete code"),
+    discipline: Optional[str] = Query(None, description="Filter by discipline"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """
+    Get athlete's strokes gained data.
+
+    Shows how many strokes the athlete gained/lost compared to field average.
+    """
+    logger.info(f"GET /athletes/{fis_code}/strokes-gained - discipline={discipline}")
+
+    query = """
+        SELECT
+            sg.race_id,
+            rd.date,
+            rd.location,
+            rd.country,
+            rd.discipline,
+            fr.rank,
+            sg.strokes_gained,
+            NULL as strokes_gained_percentile
+        FROM race_aggregate.strokes_gained sg
+        JOIN raw.race_details rd ON sg.race_id = rd.race_id
+        LEFT JOIN raw.fis_results fr ON sg.race_id = fr.race_id AND sg.fis_code = fr.fis_code
+        WHERE sg.fis_code = %(fis_code)s
+    """
+
+    params = {"fis_code": fis_code, "limit": limit}
+
+    if discipline:
+        query += " AND rd.discipline = %(discipline)s"
+        params["discipline"] = discipline
+
+    query += " ORDER BY rd.date DESC LIMIT %(limit)s"
+
+    results = execute_query(query, params)
+
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No strokes gained data found for athlete '{fis_code}'"
+        )
+
+    data = [
+        StrokesGainedItem(
+            race_id=row["race_id"],
+            date=row["date"],
+            location=row["location"],
+            country=row.get("country"),
+            discipline=row["discipline"],
+            rank=row.get("rank"),
+            strokes_gained=row.get("strokes_gained"),
+            strokes_gained_percentile=row.get("strokes_gained_percentile")
+        )
+        for row in results
+    ]
+
+    return StrokesGainedResponse(data=data)
+
+
+@router.get("/athletes/{fis_code}/strokes-gained-bib", response_model=StrokesGainedBibResponse)
+def get_athlete_strokes_gained_bib(
+    fis_code: str = Path(..., description="FIS athlete code"),
+    discipline: Optional[str] = Query(None, description="Filter by discipline"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    """
+    Get athlete's bib-relative performance.
+
+    Shows if athlete performs better/worse than expected based on bib position.
+    Positive strokes_gained_bib means performed better than expected.
+    """
+    logger.info(f"GET /athletes/{fis_code}/strokes-gained-bib - discipline={discipline}")
+
+    query = """
+        SELECT
+            sgb.race_id,
+            rd.date,
+            rd.location,
+            rd.discipline,
+            sgb.bib,
+            fr.rank,
+            NULL as expected_rank,
+            sgb.strokes_gained_bib as bib_advantage
+        FROM race_aggregate.strokes_gained_bib_relative sgb
+        JOIN raw.race_details rd ON sgb.race_id = rd.race_id
+        LEFT JOIN raw.fis_results fr ON sgb.race_id = fr.race_id AND sgb.fis_code = fr.fis_code
+        WHERE sgb.fis_code = %(fis_code)s
+    """
+
+    params = {"fis_code": fis_code, "limit": limit}
+
+    if discipline:
+        query += " AND rd.discipline = %(discipline)s"
+        params["discipline"] = discipline
+
+    query += " ORDER BY rd.date DESC LIMIT %(limit)s"
+
+    results = execute_query(query, params)
+
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No bib-relative performance data found for athlete '{fis_code}'"
+        )
+
+    data = [
+        StrokesGainedBibItem(
+            race_id=row["race_id"],
+            date=row["date"],
+            location=row["location"],
+            discipline=row["discipline"],
+            bib=row.get("bib"),
+            rank=row.get("rank"),
+            expected_rank=row.get("expected_rank"),
+            bib_advantage=row.get("bib_advantage")
+        )
+        for row in results
+    ]
+
+    return StrokesGainedBibResponse(data=data)
+
+
+@router.get("/athletes/{fis_code}/regression", response_model=RegressionResponse)
+def get_athlete_regression(
+    fis_code: str = Path(..., description="FIS athlete code"),
+    discipline: Optional[str] = Query(None, description="Filter by discipline"),
+):
+    """
+    Get athlete's course regression analysis.
+
+    Shows how course characteristics (vertical drop, gate count, altitude)
+    correlate with performance.
+    """
+    logger.info(f"GET /athletes/{fis_code}/regression - discipline={discipline}")
+
+    query = """
+        SELECT
+            fis_code,
+            discipline,
+            trait as characteristic,
+            coefficient,
+            NULL as std_error,
+            NULL as p_value,
+            r_squared
+        FROM athlete_aggregate.course_regression
+        WHERE fis_code = %(fis_code)s
+    """
+
+    params = {"fis_code": fis_code}
+
+    if discipline:
+        query += " AND discipline = %(discipline)s"
+        params["discipline"] = discipline
+
+    results = execute_query(query, params)
+
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No regression data found for athlete '{fis_code}'"
+        )
+
+    # Get discipline from first row
+    fis_code_value = results[0]["fis_code"]
+    discipline_value = results[0]["discipline"]
+
+    data = [
+        RegressionCoefficient(
+            characteristic=row["characteristic"],
+            coefficient=row.get("coefficient"),
+            std_error=row.get("std_error"),
+            p_value=row.get("p_value"),
+            r_squared=row.get("r_squared")
+        )
+        for row in results
+    ]
+
+    return RegressionResponse(
+        fis_code=fis_code_value,
+        discipline=discipline_value,
+        data=data
+    )
+
+
+@router.get("/athletes/{fis_code}/course-traits", response_model=CourseTraitResponse)
+def get_athlete_course_traits(
+    fis_code: str = Path(..., description="FIS athlete code"),
+    discipline: Optional[str] = Query(None, description="Filter by discipline"),
+):
+    """
+    Get athlete's performance by course trait bins.
+
+    Shows performance in different bins for course characteristics
+    like vertical drop, gate count, and altitude.
+    """
+    logger.info(f"GET /athletes/{fis_code}/course-traits - discipline={discipline}")
+
+    query = """
+        SELECT
+            fis_code,
+            discipline,
+            trait,
+            CAST(SUBSTRING(trait_bin FROM '[0-9]+') AS INTEGER) as quintile,
+            trait_bin as quintile_label,
+            race_count,
+            avg_z_score,
+            NULL as avg_rank
+        FROM athlete_aggregate.course_traits
+        WHERE fis_code = %(fis_code)s
+    """
+
+    params = {"fis_code": fis_code}
+
+    if discipline:
+        query += " AND discipline = %(discipline)s"
+        params["discipline"] = discipline
+
+    query += " ORDER BY trait, trait_bin"
+
+    results = execute_query(query, params)
+
+    if not results:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No course trait data found for athlete '{fis_code}'"
+        )
+
+    # Get fis_code and discipline from first row
+    fis_code_value = results[0]["fis_code"]
+    discipline_value = results[0].get("discipline")
+
+    data = [
+        CourseTraitQuintileItem(
+            trait=row["trait"],
+            quintile=row.get("quintile") or 0,
+            quintile_label=row["quintile_label"],
+            race_count=row["race_count"],
+            avg_z_score=row.get("avg_z_score"),
+            avg_rank=row.get("avg_rank")
+        )
+        for row in results
+    ]
+
+    return CourseTraitResponse(
+        fis_code=fis_code_value,
+        discipline=discipline_value,
+        data=data
+    )

@@ -306,6 +306,79 @@ class HomeAdvantageResponse(BaseModel):
     data: List[HomeAdvantageItem]
 
 
+# ========== Strokes Gained Models ==========
+
+class StrokesGainedItem(BaseModel):
+    """Single strokes gained data point."""
+    race_id: int
+    date: date
+    location: str
+    country: Optional[str] = None
+    discipline: str
+    rank: Optional[str] = None
+    strokes_gained: Optional[float] = None
+    strokes_gained_percentile: Optional[float] = None
+
+
+class StrokesGainedResponse(BaseModel):
+    """Athlete's strokes gained history."""
+    data: List[StrokesGainedItem]
+
+
+class StrokesGainedBibItem(BaseModel):
+    """Bib-relative performance data."""
+    race_id: int
+    date: date
+    location: str
+    discipline: str
+    bib: Optional[int] = None
+    rank: Optional[str] = None
+    expected_rank: Optional[float] = None
+    bib_advantage: Optional[float] = None  # Negative = performed better than expected
+
+
+class StrokesGainedBibResponse(BaseModel):
+    """Athlete's bib-relative performance."""
+    data: List[StrokesGainedBibItem]
+
+
+# ========== Regression Analysis Models ==========
+
+class RegressionCoefficient(BaseModel):
+    """Regression coefficient for a course characteristic."""
+    characteristic: str  # e.g., "vertical_drop", "gate_count", "altitude"
+    coefficient: Optional[float] = None
+    std_error: Optional[float] = None
+    p_value: Optional[float] = None
+    r_squared: Optional[float] = None
+
+
+class RegressionResponse(BaseModel):
+    """Athlete's course regression analysis."""
+    fis_code: str
+    discipline: str
+    data: List[RegressionCoefficient]
+
+
+# ========== Course Traits Models ==========
+
+class CourseTraitQuintileItem(BaseModel):
+    """Performance in a course trait quintile."""
+    trait: str  # e.g., "vertical_drop", "gate_count", "altitude"
+    quintile: int  # 1-5
+    quintile_label: str  # e.g., "Very Low", "Low", "Medium", "High", "Very High"
+    race_count: int
+    avg_z_score: Optional[float] = None
+    avg_rank: Optional[float] = None
+
+
+class CourseTraitResponse(BaseModel):
+    """Athlete's performance by course traits."""
+    fis_code: str
+    discipline: Optional[str] = None
+    data: List[CourseTraitQuintileItem]
+
+
 # ========== Error Models ==========
 
 class ErrorDetail(BaseModel):
