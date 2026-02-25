@@ -547,35 +547,129 @@ def get_athlete_strokes_gained_bib(
 def get_athlete_regression(
     fis_code: str = Path(..., description="FIS athlete code"),
     discipline: Optional[str] = Query(None, description="Filter by discipline"),
+    year: Optional[int] = Query(None, description="Filter by year"),
 ):
     """
     Get athlete's course regression analysis.
 
     Shows how course characteristics (vertical drop, gate count, altitude)
     correlate with performance.
+
+    When year filter is provided, calculates live from raw race data.
+    When no year filter, uses pre-computed aggregate for speed.
     """
-    logger.info(f"GET /athletes/{fis_code}/regression - discipline={discipline}")
+    logger.info(f"GET /athletes/{fis_code}/regression - discipline={discipline}, year={year}")
 
-    query = """
-        SELECT
-            fis_code,
-            discipline,
-            trait as characteristic,
-            coefficient,
-            NULL as std_error,
-            NULL as p_value,
-            r_squared
-        FROM athlete_aggregate.course_regression
-        WHERE fis_code = %(fis_code)s
-    """
+    # If year filter provided, calculate live from raw data
+    if year:
+        query = """
+            WITH race_data AS (
+                SELECT
+                    r.fis_code,
+                    r.discipline,
+                    r.race_z_score,
+                    c.vertical_drop,
+                    c.gate_count,
+                    c.start_altitude,
+                    c.winning_time,
+                    c.dnf_rate,
+                    c.course_length
+                FROM raw.fis_results r
+                JOIN raw.race_details rd ON r.race_id = rd.race_id
+                JOIN raw.courses c ON rd.course_id = c.course_id
+                WHERE r.fis_code = %(fis_code)s
+                    AND EXTRACT(YEAR FROM r.date) = %(year)s
+                    AND r.race_z_score IS NOT NULL
+        """
 
-    params = {"fis_code": fis_code}
+        params = {"fis_code": fis_code, "year": year}
 
-    if discipline:
-        query += " AND discipline = %(discipline)s"
-        params["discipline"] = discipline
+        if discipline:
+            query += " AND r.discipline = %(discipline)s"
+            params["discipline"] = discipline
 
-    results = execute_query(query, params)
+        query += """
+            ),
+            trait_stats AS (
+                SELECT
+                    'vertical_drop' as trait,
+                    CORR(vertical_drop, race_z_score) as coefficient,
+                    REGR_R2(race_z_score, vertical_drop) as r_squared
+                FROM race_data
+                WHERE vertical_drop IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    'gate_count' as trait,
+                    CORR(gate_count, race_z_score) as coefficient,
+                    REGR_R2(race_z_score, gate_count) as r_squared
+                FROM race_data
+                WHERE gate_count IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    'start_altitude' as trait,
+                    CORR(start_altitude, race_z_score) as coefficient,
+                    REGR_R2(race_z_score, start_altitude) as r_squared
+                FROM race_data
+                WHERE start_altitude IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    'winning_time' as trait,
+                    CORR(winning_time, race_z_score) as coefficient,
+                    REGR_R2(race_z_score, winning_time) as r_squared
+                FROM race_data
+                WHERE winning_time IS NOT NULL
+
+                UNION ALL
+
+                SELECT
+                    'dnf_rate' as trait,
+                    CORR(dnf_rate, race_z_score) as coefficient,
+                    REGR_R2(race_z_score, dnf_rate) as r_squared
+                FROM race_data
+                WHERE dnf_rate IS NOT NULL
+            )
+            SELECT
+                %(fis_code)s as fis_code,
+                %(discipline_out)s as discipline,
+                trait as characteristic,
+                coefficient,
+                NULL as std_error,
+                NULL as p_value,
+                r_squared
+            FROM trait_stats
+            WHERE coefficient IS NOT NULL
+        """
+
+        params["discipline_out"] = discipline or "All"
+        results = execute_query(query, params)
+    else:
+        # Use pre-computed aggregate table (fast path)
+        query = """
+            SELECT
+                fis_code,
+                discipline,
+                trait as characteristic,
+                coefficient,
+                NULL as std_error,
+                NULL as p_value,
+                r_squared
+            FROM athlete_aggregate.course_regression
+            WHERE fis_code = %(fis_code)s
+        """
+
+        params = {"fis_code": fis_code}
+
+        if discipline:
+            query += " AND discipline = %(discipline)s"
+            params["discipline"] = discipline
+
+        results = execute_query(query, params)
 
     if not results:
         raise HTTPException(
@@ -609,38 +703,137 @@ def get_athlete_regression(
 def get_athlete_course_traits(
     fis_code: str = Path(..., description="FIS athlete code"),
     discipline: Optional[str] = Query(None, description="Filter by discipline"),
+    year: Optional[int] = Query(None, description="Filter by year"),
 ):
     """
     Get athlete's performance by course trait bins.
 
     Shows performance in different bins for course characteristics
     like vertical drop, gate count, and altitude.
+
+    When year filter is provided, calculates live from raw race data.
+    When no year filter, uses pre-computed aggregate for speed.
     """
-    logger.info(f"GET /athletes/{fis_code}/course-traits - discipline={discipline}")
+    logger.info(f"GET /athletes/{fis_code}/course-traits - discipline={discipline}, year={year}")
 
-    query = """
-        SELECT
-            fis_code,
-            discipline,
-            trait,
-            CAST(SUBSTRING(trait_bin FROM '[0-9]+') AS INTEGER) as quintile,
-            trait_bin as quintile_label,
-            race_count,
-            avg_z_score,
-            NULL as avg_rank
-        FROM athlete_aggregate.course_traits
-        WHERE fis_code = %(fis_code)s
-    """
+    # If year filter provided, calculate live from raw data
+    if year:
+        query = """
+            WITH race_data AS (
+                SELECT
+                    r.fis_code,
+                    r.discipline,
+                    r.race_z_score,
+                    c.vertical_drop,
+                    c.gate_count,
+                    c.start_altitude
+                FROM raw.fis_results r
+                JOIN raw.race_details rd ON r.race_id = rd.race_id
+                JOIN raw.courses c ON rd.course_id = c.course_id
+                WHERE r.fis_code = %(fis_code)s
+                    AND EXTRACT(YEAR FROM r.date) = %(year)s
+                    AND r.race_z_score IS NOT NULL
+        """
 
-    params = {"fis_code": fis_code}
+        params = {"fis_code": fis_code, "year": year}
 
-    if discipline:
-        query += " AND discipline = %(discipline)s"
-        params["discipline"] = discipline
+        if discipline:
+            query += " AND r.discipline = %(discipline)s"
+            params["discipline"] = discipline
 
-    query += " ORDER BY trait, trait_bin"
+        query += """
+            ),
+            trait_quintiles AS (
+                -- Vertical Drop quintiles
+                SELECT
+                    'vertical_drop' as trait,
+                    CASE
+                        WHEN vertical_drop IS NULL THEN NULL
+                        WHEN vertical_drop <= (SELECT PERCENTILE_CONT(0.2) WITHIN GROUP (ORDER BY vertical_drop) FROM race_data WHERE vertical_drop IS NOT NULL) THEN 0
+                        WHEN vertical_drop <= (SELECT PERCENTILE_CONT(0.4) WITHIN GROUP (ORDER BY vertical_drop) FROM race_data WHERE vertical_drop IS NOT NULL) THEN 1
+                        WHEN vertical_drop <= (SELECT PERCENTILE_CONT(0.6) WITHIN GROUP (ORDER BY vertical_drop) FROM race_data WHERE vertical_drop IS NOT NULL) THEN 2
+                        WHEN vertical_drop <= (SELECT PERCENTILE_CONT(0.8) WITHIN GROUP (ORDER BY vertical_drop) FROM race_data WHERE vertical_drop IS NOT NULL) THEN 3
+                        ELSE 4
+                    END as quintile,
+                    race_z_score
+                FROM race_data
+                WHERE vertical_drop IS NOT NULL
 
-    results = execute_query(query, params)
+                UNION ALL
+
+                -- Gate Count quintiles
+                SELECT
+                    'gate_count' as trait,
+                    CASE
+                        WHEN gate_count IS NULL THEN NULL
+                        WHEN gate_count <= (SELECT PERCENTILE_CONT(0.2) WITHIN GROUP (ORDER BY gate_count) FROM race_data WHERE gate_count IS NOT NULL) THEN 0
+                        WHEN gate_count <= (SELECT PERCENTILE_CONT(0.4) WITHIN GROUP (ORDER BY gate_count) FROM race_data WHERE gate_count IS NOT NULL) THEN 1
+                        WHEN gate_count <= (SELECT PERCENTILE_CONT(0.6) WITHIN GROUP (ORDER BY gate_count) FROM race_data WHERE gate_count IS NOT NULL) THEN 2
+                        WHEN gate_count <= (SELECT PERCENTILE_CONT(0.8) WITHIN GROUP (ORDER BY gate_count) FROM race_data WHERE gate_count IS NOT NULL) THEN 3
+                        ELSE 4
+                    END as quintile,
+                    race_z_score
+                FROM race_data
+                WHERE gate_count IS NOT NULL
+
+                UNION ALL
+
+                -- Start Altitude quintiles
+                SELECT
+                    'start_altitude' as trait,
+                    CASE
+                        WHEN start_altitude IS NULL THEN NULL
+                        WHEN start_altitude <= (SELECT PERCENTILE_CONT(0.2) WITHIN GROUP (ORDER BY start_altitude) FROM race_data WHERE start_altitude IS NOT NULL) THEN 0
+                        WHEN start_altitude <= (SELECT PERCENTILE_CONT(0.4) WITHIN GROUP (ORDER BY start_altitude) FROM race_data WHERE start_altitude IS NOT NULL) THEN 1
+                        WHEN start_altitude <= (SELECT PERCENTILE_CONT(0.6) WITHIN GROUP (ORDER BY start_altitude) FROM race_data WHERE start_altitude IS NOT NULL) THEN 2
+                        WHEN start_altitude <= (SELECT PERCENTILE_CONT(0.8) WITHIN GROUP (ORDER BY start_altitude) FROM race_data WHERE start_altitude IS NOT NULL) THEN 3
+                        ELSE 4
+                    END as quintile,
+                    race_z_score
+                FROM race_data
+                WHERE start_altitude IS NOT NULL
+            )
+            SELECT
+                %(fis_code)s as fis_code,
+                %(discipline_out)s as discipline,
+                trait,
+                quintile,
+                'Q' || (quintile + 1) as quintile_label,
+                COUNT(*) as race_count,
+                AVG(race_z_score) as avg_z_score,
+                NULL as avg_rank
+            FROM trait_quintiles
+            WHERE quintile IS NOT NULL
+            GROUP BY trait, quintile
+            ORDER BY trait, quintile
+        """
+
+        params["discipline_out"] = discipline or "All"
+        results = execute_query(query, params)
+    else:
+        # Use pre-computed aggregate table (fast path)
+        query = """
+            SELECT
+                fis_code,
+                discipline,
+                trait,
+                CAST(SUBSTRING(trait_bin FROM '[0-9]+') AS INTEGER) as quintile,
+                trait_bin as quintile_label,
+                race_count,
+                avg_z_score,
+                NULL as avg_rank
+            FROM athlete_aggregate.course_traits
+            WHERE fis_code = %(fis_code)s
+        """
+
+        params = {"fis_code": fis_code}
+
+        if discipline:
+            query += " AND discipline = %(discipline)s"
+            params["discipline"] = discipline
+
+        query += " ORDER BY trait, trait_bin"
+        results = execute_query(query, params)
 
     if not results:
         raise HTTPException(

@@ -125,18 +125,20 @@ export default function AthleteProfile() {
     fetchData();
   }, [fisCode]);
 
-  // Re-fetch aggregate data when discipline filter changes
+  // Re-fetch aggregate data when year or discipline filter changes
   useEffect(() => {
     const fetchAggregateData = async () => {
       if (!fisCode) return;
 
-      const params = selectedDiscipline ? { discipline: selectedDiscipline } : {};
+      const params: { discipline?: string; year?: number } = {};
+      if (selectedDiscipline) params.discipline = selectedDiscipline;
+      if (selectedYear) params.year = parseInt(selectedYear);
 
       try {
         const regressionData = await getAthleteRegression(fisCode, params);
         setRegression(regressionData);
       } catch (err) {
-        console.warn('No regression data available for selected discipline');
+        console.warn('No regression data available for selected filters');
         setRegression(null);
       }
 
@@ -144,13 +146,13 @@ export default function AthleteProfile() {
         const courseTraitsData = await getAthleteCourseTraits(fisCode, params);
         setCourseTraits(courseTraitsData);
       } catch (err) {
-        console.warn('No course traits data available for selected discipline');
+        console.warn('No course traits data available for selected filters');
         setCourseTraits(null);
       }
     };
 
     fetchAggregateData();
-  }, [fisCode, selectedDiscipline]);
+  }, [fisCode, selectedDiscipline, selectedYear]);
 
   if (loading) {
     return <PageLoader />;

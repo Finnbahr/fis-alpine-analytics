@@ -74,7 +74,7 @@ export const getAthleteStrokesGainedBib = async (
 
 export const getAthleteRegression = async (
   fisCode: string,
-  params?: { discipline?: string }
+  params?: { discipline?: string; year?: number }
 ) => {
   const response = await apiClient.get(`/athletes/${fisCode}/regression`, { params });
   return response.data;
@@ -82,7 +82,7 @@ export const getAthleteRegression = async (
 
 export const getAthleteCourseTraits = async (
   fisCode: string,
-  params?: { discipline?: string }
+  params?: { discipline?: string; year?: number }
 ) => {
   const response = await apiClient.get(`/athletes/${fisCode}/course-traits`, { params });
   return response.data;
