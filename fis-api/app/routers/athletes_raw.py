@@ -55,7 +55,7 @@ def list_athletes(
             country,
             COUNT(*) as starts,
             COUNT(CASE WHEN rank = '1' THEN 1 END) as wins,
-            COUNT(CASE WHEN rank::int <= 3 THEN 1 END) as podiums,
+            COUNT(CASE WHEN rank ~ '^[0-9]+$' AND rank::int <= 3 THEN 1 END) as podiums,
             ROUND(AVG(fis_points)::numeric, 2) as avg_fis_points
         FROM raw.fis_results
         WHERE fis_code IS NOT NULL AND name IS NOT NULL
@@ -120,7 +120,7 @@ def get_athlete(fis_code: str = Path(..., description="FIS athlete code")):
             country,
             COUNT(*) as starts,
             COUNT(CASE WHEN rank = '1' THEN 1 END) as wins,
-            COUNT(CASE WHEN rank::int <= 3 THEN 1 END) as podiums,
+            COUNT(CASE WHEN rank ~ '^[0-9]+$' AND rank::int <= 3 THEN 1 END) as podiums,
             ROUND(AVG(fis_points)::numeric, 2) as avg_fis_points
         FROM raw.fis_results
         WHERE fis_code = %(fis_code)s
