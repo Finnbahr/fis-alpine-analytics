@@ -9,7 +9,7 @@ import logging
 
 from app.config import settings
 from app.database import test_connection
-from app.routers import athletes, races, search, leaderboards, courses, analytics
+from app.routers import athletes_raw as athletes, races, search, leaderboards, courses, analytics
 
 # Configure logging
 logging.basicConfig(
