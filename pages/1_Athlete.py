@@ -260,18 +260,20 @@ def load_location_stats(name: str) -> pd.DataFrame:
     try:
         df = query("""
             SELECT
-                location,
-                discipline,
+                sg.location,
+                sg.discipline,
+                rd.race_type,
                 COUNT(*)                                              AS race_count,
-                AVG(fis_points)                                       AS avg_fis_points,
-                MIN(fis_points)                                       AS best_fis_points,
-                AVG(points_gained)                                    AS avg_pts_gained,
-                AVG(race_z_score)                                     AS avg_z_score,
-                MAX(date)                                             AS last_raced
-            FROM race_aggregate.strokes_gained
-            WHERE name = :name
-              AND location IS NOT NULL
-            GROUP BY location, discipline
+                AVG(sg.fis_points)                                    AS avg_fis_points,
+                MIN(sg.fis_points)                                    AS best_fis_points,
+                AVG(sg.points_gained)                                 AS avg_pts_gained,
+                AVG(sg.race_z_score)                                  AS avg_z_score,
+                MAX(sg.date)                                          AS last_raced
+            FROM race_aggregate.strokes_gained sg
+            JOIN raw.race_details rd ON rd.race_id = sg.race_id
+            WHERE sg.name = :name
+              AND sg.location IS NOT NULL
+            GROUP BY sg.location, sg.discipline, rd.race_type
             ORDER BY avg_z_score DESC
         """, {"name": name})
         if not df.empty:
@@ -324,10 +326,12 @@ def load_bib_relative_stats(name: str) -> pd.DataFrame:
             WITH athlete_races AS (
                 SELECT sg.race_id, sg.date, sg.discipline, sg.location,
                        r.bib AS athlete_bib,
-                       sg.points_gained AS athlete_sg
+                       sg.points_gained AS athlete_sg,
+                       rd.race_type
                 FROM race_aggregate.strokes_gained sg
                 JOIN raw.fis_results r
                     ON r.race_id = sg.race_id AND r.name = sg.name
+                JOIN raw.race_details rd ON rd.race_id = sg.race_id
                 WHERE sg.name = :name
                   AND r.bib IS NOT NULL
             )
@@ -337,6 +341,7 @@ def load_bib_relative_stats(name: str) -> pd.DataFrame:
                 ar.discipline,
                 ar.location,
                 ar.athlete_sg,
+                ar.race_type,
                 AVG(sg.points_gained)   AS peer_avg_sg,
                 COUNT(DISTINCT sg.name) AS peer_count
             FROM athlete_races ar
@@ -346,10 +351,11 @@ def load_bib_relative_stats(name: str) -> pd.DataFrame:
             JOIN raw.fis_results r
                 ON r.race_id = sg.race_id AND r.name = sg.name
                AND r.bib BETWEEN ar.athlete_bib - 5 AND ar.athlete_bib + 5
-            GROUP BY ar.race_id, ar.date, ar.discipline, ar.location, ar.athlete_sg
+            GROUP BY ar.race_id, ar.date, ar.discipline, ar.location, ar.athlete_sg, ar.race_type
             ORDER BY ar.date
         """, {"name": name})
         df["date"] = pd.to_datetime(df["date"])
+        df["race_type"] = df["race_type"].fillna("Unknown")
         return df
     except Exception:
         return pd.DataFrame()
@@ -442,8 +448,11 @@ sg_f      = df_sg[df_sg["discipline"].isin(selected_disc) & df_sg["race_type"].i
 top_f     = df_top[df_top["discipline"].isin(selected_disc) & df_top["race_type"].isin(selected_race_types)] if not df_top.empty else df_top
 field_f   = df_field[df_field["race_id"].isin(streak_f["race_id"])] if not df_field.empty else df_field
 tier_f    = df_tier[df_tier["discipline"].isin(selected_disc)]
-bib_f     = df_bib[df_bib["discipline"].isin(selected_disc)] if not df_bib.empty else df_bib
-locs_f    = df_locs[df_locs["discipline"].isin(selected_disc)] if not df_locs.empty else df_locs
+bib_f     = df_bib[df_bib["discipline"].isin(selected_disc) & df_bib["race_type"].isin(selected_race_types)] if not df_bib.empty else df_bib
+locs_f    = combine_race_types(
+    df_locs[df_locs["discipline"].isin(selected_disc) & df_locs["race_type"].isin(selected_race_types)] if not df_locs.empty else df_locs,
+    ["location", "discipline"]
+)
 
 # Pre-aggregated tables: filter by race_type then combine (weighted avg) per discipline
 career_f = combine_race_types(
