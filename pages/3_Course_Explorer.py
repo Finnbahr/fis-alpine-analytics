@@ -17,7 +17,7 @@ from database import query
 # Data loaders
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_venue_list() -> pd.DataFrame:
     return query("""
         SELECT location, discipline, COUNT(*) AS races
@@ -28,7 +28,7 @@ def load_venue_list() -> pd.DataFrame:
     """)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_venue_profile(location: str, discipline: str) -> pd.DataFrame:
     df = query("""
         SELECT
@@ -78,7 +78,7 @@ def load_venue_profile(location: str, discipline: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_discipline_averages(discipline: str) -> dict:
     df = query("""
         SELECT
@@ -98,7 +98,7 @@ def load_discipline_averages(discipline: str) -> dict:
     return {}
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_setter_leaderboard(discipline: str | None = None) -> pd.DataFrame:
     params: dict = {}
     disc_filter = ""
@@ -134,7 +134,7 @@ def load_setter_leaderboard(discipline: str | None = None) -> pd.DataFrame:
     """, params or None)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_setter_races(setter: str) -> pd.DataFrame:
     df = query("""
         SELECT
@@ -161,7 +161,7 @@ def load_setter_races(setter: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_best_courses(discipline: str | None = None, min_performances: int = 3) -> pd.DataFrame:
     params: dict = {"min_perf": min_performances}
     disc_filter = ""
@@ -188,7 +188,7 @@ def load_best_courses(discipline: str | None = None, min_performances: int = 3) 
     """, params)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_hdi(discipline: str | None = None, min_races: int = 2) -> pd.DataFrame:
     params: dict = {"min_races": min_races}
     disc_filter = ""
@@ -210,7 +210,7 @@ def load_hdi(discipline: str | None = None, min_races: int = 2) -> pd.DataFrame:
     """, params)
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_hdi_detail(location: str, discipline: str, homologation: str) -> dict:
     """Full HDI row including normalized component scores for a specific course."""
     df = query("""
@@ -236,7 +236,7 @@ def load_hdi_detail(location: str, discipline: str, homologation: str) -> dict:
     return {}
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_similar_courses(location: str, discipline: str, homologation: str) -> pd.DataFrame:
     """Top similar courses for a given reference course."""
     df = query("""
@@ -266,7 +266,7 @@ def load_similar_courses(location: str, discipline: str, homologation: str) -> p
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_course_search(
     disciplines: tuple,
     min_vert: int | None,

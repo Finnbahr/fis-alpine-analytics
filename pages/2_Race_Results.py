@@ -15,7 +15,7 @@ from database import query
 # Data loaders
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_race_index() -> pd.DataFrame:
     """All races with summary stats — one row per race_id so M/W and double-headers stay separate."""
     df = query("""
@@ -42,7 +42,7 @@ def load_race_index() -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_race_results(race_id: str) -> pd.DataFrame:
     """Full field for a specific race, sorted best-to-worst."""
     return query("""
@@ -53,7 +53,7 @@ def load_race_results(race_id: str) -> pd.DataFrame:
     """, {"race_id": race_id})
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_race_info(race_id: str) -> dict:
     """Race metadata from raw.race_details for a specific race_id."""
     try:
@@ -96,7 +96,7 @@ def load_race_info(race_id: str) -> dict:
     return {}
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_race_raw_results(race_id: str) -> pd.DataFrame:
     """Bib, country, run times from raw.fis_results for a specific race_id."""
     try:

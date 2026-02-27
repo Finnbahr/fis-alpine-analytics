@@ -41,7 +41,7 @@ def bins_to_ordinal(bins) -> dict:
 # Data loaders
 # ---------------------------------------------------------------------------
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_athlete_list() -> list[str]:
     df = query("""
         SELECT DISTINCT name
@@ -52,7 +52,7 @@ def load_athlete_list() -> list[str]:
     return df["name"].tolist()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_athlete_by_fis_id(fis_id: str) -> str | None:
     """Look up athlete name by FIS ID."""
     try:
@@ -69,7 +69,7 @@ def load_athlete_by_fis_id(fis_id: str) -> str | None:
     return None
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_fis_code(name: str) -> str | None:
     try:
         df = query("""
@@ -85,7 +85,7 @@ def load_fis_code(name: str) -> str | None:
     return None
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_hot_streak(name: str) -> pd.DataFrame:
     df = query("""
         SELECT race_id, date, discipline, fis_points, rank,
@@ -98,7 +98,7 @@ def load_hot_streak(name: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_career_stats(name: str) -> pd.DataFrame:
     return query("""
         SELECT discipline, race_count,
@@ -110,7 +110,7 @@ def load_career_stats(name: str) -> pd.DataFrame:
     """, {"name": name})
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_yearly_stats(name: str) -> pd.DataFrame:
     df = query("""
         SELECT race_year, discipline, race_count,
@@ -123,7 +123,7 @@ def load_yearly_stats(name: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_performance_tier(name: str) -> pd.DataFrame:
     return query("""
         SELECT discipline, year, tier, avg_fis_points, race_count
@@ -133,7 +133,7 @@ def load_performance_tier(name: str) -> pd.DataFrame:
     """, {"name": name})
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_course_traits(name: str) -> pd.DataFrame:
     return query("""
         SELECT discipline, trait, trait_bin,
@@ -144,7 +144,7 @@ def load_course_traits(name: str) -> pd.DataFrame:
     """, {"name": name})
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_strokes_gained(name: str) -> pd.DataFrame:
     df = query("""
         SELECT race_id, date, discipline, location, fis_points,
@@ -157,7 +157,7 @@ def load_strokes_gained(name: str) -> pd.DataFrame:
     return df
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_top_performances(name: str) -> pd.DataFrame:
     try:
         df = query("""
@@ -174,7 +174,7 @@ def load_top_performances(name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_location_stats(name: str) -> pd.DataFrame:
     """Aggregate performance per venue — used for the Best Hills table."""
     try:
@@ -201,7 +201,7 @@ def load_location_stats(name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_race_field_stats(name: str) -> pd.DataFrame:
     """Field-level FIS point distribution for each race the athlete competed in."""
     try:
@@ -232,7 +232,7 @@ def load_race_field_stats(name: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=86400)
 def load_bib_relative_stats(name: str) -> pd.DataFrame:
     """
     For each race the athlete ran, get the average strokes gained of athletes
