@@ -249,7 +249,6 @@ def load_similar_courses(location: str, discipline: str, homologation: str) -> p
             ROUND(sc.similar_start_altitude::numeric, 0) AS avg_start_alt,
             ROUND(sc.similar_vertical_drop::numeric, 0) AS avg_vert,
             ROUND(sc.similar_dnf_rate::numeric * 100, 1) AS dnf_pct,
-            ROUND(sc.similar_fis_points::numeric, 1)    AS avg_fis,
             rd.country
         FROM course_aggregate.similar_courses sc
         LEFT JOIN (
@@ -1174,7 +1173,7 @@ elif page == "Course Similarity":
                         text=sim_df["similarity_score"].round(2),
                         textposition="outside",
                         customdata=sim_df[[
-                            "avg_vert", "avg_gates", "avg_start_alt", "dnf_pct", "avg_fis"
+                            "avg_vert", "avg_gates", "avg_start_alt", "dnf_pct"
                         ]].values,
                         hovertemplate=(
                             "<b>%{y}</b><br>"
@@ -1183,8 +1182,7 @@ elif page == "Course Similarity":
                             "Avg Vert: %{customdata[0]:.0f} m<br>"
                             "Avg Gates: %{customdata[1]:.1f}<br>"
                             "Start Alt: %{customdata[2]:.0f} m<br>"
-                            "DNF Rate: %{customdata[3]:.1f}%<br>"
-                            "Avg Field FIS: %{customdata[4]:.1f}<extra></extra>"
+                            "DNF Rate: %{customdata[3]:.1f}%<extra></extra>"
                         ),
                     ))
                     fig_sim.update_layout(
@@ -1215,20 +1213,18 @@ elif page == "Course Similarity":
 
                         # Normalize both courses for comparison (use sim row values directly as they're already averages)
                         ref_row_avg = ref_rows[["vertical_drop", "gates_r1", "start_altitude"]].mean()
-                        dims = ["Vert Drop (m)", "Gates R1", "Start Alt (m)", "DNF %", "Avg Field FIS"]
+                        dims = ["Vert Drop (m)", "Gates R1", "Start Alt (m)", "DNF %"]
                         ref_vals = [
                             ref_row_avg.get("vertical_drop", 0) or 0,
                             ref_row_avg.get("gates_r1", 0) or 0,
                             ref_row_avg.get("start_altitude", 0) or 0,
                             0,  # DNF not directly in venue profile
-                            ref_rows["avg_fis"].mean() or 0,
                         ]
                         sim_vals = [
                             sim_row["avg_vert"] or 0,
                             sim_row["avg_gates"] or 0,
                             sim_row["avg_start_alt"] or 0,
                             sim_row["dnf_pct"] or 0,
-                            sim_row["avg_fis"] or 0,
                         ]
 
                         fig_cmp_radar = go.Figure()

@@ -179,10 +179,23 @@ def load_consistency_stats(name: str) -> pd.DataFrame:
     try:
         return query("""
             SELECT discipline, dnf_rate, max_dnf_streak,
-                   bounce_back_z_score, re_dnf_rate
+                   bounce_back_z_score, re_dnf_rate, cv_fis
             FROM athlete_aggregate.performance_consistency_career
             WHERE name = :name
             ORDER BY discipline
+        """, {"name": name})
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=604800)
+def load_consistency_yearly(name: str) -> pd.DataFrame:
+    try:
+        return query("""
+            SELECT discipline, season, n_races, std_race_z_score, cv_fis
+            FROM athlete_aggregate.performance_consistency_yearly
+            WHERE name = :name
+            ORDER BY discipline, season
         """, {"name": name})
     except Exception:
         return pd.DataFrame()
@@ -337,6 +350,7 @@ with st.spinner(f"Loading {selected}..."):
     fis_code        = load_fis_code(selected)
     df_top          = load_top_performances(selected)
     df_consistency  = load_consistency_stats(selected)
+    df_cons_yearly  = load_consistency_yearly(selected)
 
 if df_streak.empty:
     st.warning("No data found for this athlete.")
@@ -371,6 +385,7 @@ bib_f          = df_bib[df_bib["discipline"].isin(selected_disc)] if not df_bib.
 locs_f         = df_locs[df_locs["discipline"].isin(selected_disc)] if not df_locs.empty else df_locs
 top_f          = df_top[df_top["discipline"].isin(selected_disc)] if not df_top.empty else df_top
 consistency_f  = df_consistency[df_consistency["discipline"].isin(selected_disc)] if not df_consistency.empty else df_consistency
+cons_yearly_f  = df_cons_yearly[df_cons_yearly["discipline"].isin(selected_disc)] if not df_cons_yearly.empty else df_cons_yearly
 
 # ---------------------------------------------------------------------------
 # Page header — name + FIS code
@@ -757,12 +772,61 @@ elif section == "Consistency & Bounce Back":
             sub = streak_f[streak_f["discipline"] == disc]["race_z_score"].dropna()
             if len(sub) < 2:
                 continue
+            # Pull career CV from consistency table
+            cv_row = consistency_f[consistency_f["discipline"] == disc]
+            cv_val = cv_row["cv_fis"].iloc[0] if not cv_row.empty and pd.notna(cv_row["cv_fis"].iloc[0]) else None
             with col:
                 with st.container(border=True):
                     st.markdown(f"**{disc}**")
                     st.metric("Std Dev (Z)", f"{sub.std():.3f}",
-                              help="Lower = more consistent race-to-race")
-                    st.metric("% Above Avg", f"{(sub > 0).mean()*100:.0f}%")
+                              help="Standard deviation of Z-Scores across all career starts. Lower = more consistent race-to-race.")
+                    st.metric("% Above Avg", f"{(sub > 0).mean()*100:.0f}%",
+                              help="Share of career starts where the athlete beat the field average.")
+                    if cv_val is not None:
+                        st.metric("CV (FIS)", f"{cv_val:.2f}",
+                                  help="Coefficient of Variation of FIS points (std / mean). Lower = results are tightly clustered around career average. Higher = wide swings between dominant and poor races.")
+
+        st.markdown("---")
+        st.subheader("Consistency Over Time")
+        st.caption(
+            "Standard deviation of Z-Scores per season. "
+            "A low value means results were tightly clustered around the athlete's average that year — "
+            "they delivered a reliable, predictable level of performance. "
+            "A high value means wide swings: dominant one race, well below average the next. "
+            "Tracking this year to year reveals whether an athlete is becoming more or less reliable as their career progresses."
+        )
+        if not cons_yearly_f.empty:
+            cy = cons_yearly_f.dropna(subset=["std_race_z_score"]).copy()
+            cy["season"] = cy["season"].astype(str)
+            # Build one trace per discipline
+            fig_cy = go.Figure()
+            palette = px.colors.qualitative.Plotly
+            for i, disc in enumerate(sorted(cy["discipline"].unique())):
+                sub = cy[cy["discipline"] == disc].sort_values("season")
+                fig_cy.add_trace(go.Bar(
+                    x=sub["season"],
+                    y=sub["std_race_z_score"].round(3),
+                    name=disc,
+                    marker_color=palette[i % len(palette)],
+                    text=sub["n_races"].apply(lambda n: f"n={int(n)}"),
+                    textposition="outside",
+                    hovertemplate=(
+                        "<b>" + disc + " %{x}</b><br>"
+                        "Std Dev Z: %{y:.3f}<br>"
+                        "Races: %{text}<extra></extra>"
+                    ),
+                ))
+            fig_cy.update_layout(
+                height=380,
+                margin=dict(t=20, b=0),
+                barmode="group",
+                xaxis_title="Season",
+                yaxis_title="Std Dev of Z-Score",
+                legend=dict(orientation="h", y=1.08),
+            )
+            st.plotly_chart(fig_cy, use_container_width=True)
+        else:
+            st.info("No yearly consistency data for selected disciplines.")
 
         st.markdown("---")
         st.subheader("Bounce Back After a Bad Race")
