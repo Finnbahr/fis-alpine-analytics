@@ -124,6 +124,20 @@ with k1:
 
             A career average Z above 0 means the athlete beats the field more often than not —
             the clearest single indicator of whether an athlete is above or below their competitive median.
+
+            **How it is calculated:**
+
+            For each race, collect every finisher's FIS race points. Compute the field mean and
+            standard deviation. Then for each athlete:
+
+            > **Z = (Field Mean FIS − Athlete FIS) / Field Std Dev**
+
+            Because lower FIS points mean a better result, the formula subtracts the athlete's
+            points *from* the mean — so a top finisher with a low FIS point total produces a
+            positive Z. An athlete at exactly the field mean gets Z = 0. When all finishers
+            post identical times (zero standard deviation), Z is set to 0 by convention.
+            Only athletes with a valid FIS points result are included in each race's field calculation —
+            DNFs, DSQs, and DNS entries are excluded from the distribution.
             """
         )
 
