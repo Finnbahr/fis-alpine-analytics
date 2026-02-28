@@ -2,12 +2,12 @@
 Alpine Analytics — Recruiting Board
 
 Ranks athletes within an age cohort using a consistency-weighted composite score.
-Philosophy: a reliable 40-point skier is more valuable than one who peaks at 38
-but averages 52 with high variance.
+Philosophy: a reliable 40-point skier is a safer development bet than one who peaks
+at 38 once but surrounds it with 55s.
 
-Composite (Scout Rating):
+Scout Rating formula:
   raw_score = mean_fis + 0.75 * std_fis + (dnf_rate * 50)
-  Scout Rating 1–100: 100 = best in cohort, 0 = worst
+  Scout Rating 0–100: 100 = best in cohort
 """
 
 import sys, os
@@ -34,7 +34,6 @@ COHORTS = {
     "Custom range": None,
 }
 
-# Map display label → list of raw race_type strings
 RACE_LEVEL_GROUPS = {
     "All levels": None,
     "World Cup": [
@@ -65,11 +64,6 @@ DISCIPLINES = ["All", "Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine C
 
 @st.cache_data(ttl=604800)
 def load_recruiting_data() -> pd.DataFrame:
-    """
-    Pull all athlete career stats needed for the recruiting board.
-    Attaches YOB, country (modal value from fis_results), and gender
-    (derived from the sex of races each athlete competed in).
-    """
     return query("""
         WITH yob_country AS (
             SELECT DISTINCT ON (fis_code)
@@ -123,10 +117,6 @@ def load_recruiting_data() -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 
 def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add `raw_score` and `scout_rating` (1–100) columns to df.
-    Lower raw_score = more reliable = higher scout rating.
-    """
     df = df.copy()
     df["raw_score"] = (
         df["mean_fis"]
@@ -137,14 +127,13 @@ def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
     if n <= 1:
         df["scout_rating"] = 100.0
         return df
-    # Rank ascending (best = rank 1 = lowest raw_score)
     ranks = df["raw_score"].rank(method="min", ascending=True)
     df["scout_rating"] = ((1 - (ranks - 1) / (n - 1)) * 100).round(1)
     return df
 
 
 # ---------------------------------------------------------------------------
-# Page layout
+# Page config
 # ---------------------------------------------------------------------------
 
 st.set_page_config(
@@ -152,20 +141,59 @@ st.set_page_config(
     layout="wide",
 )
 
+# Under-construction blur overlay
+st.markdown("""
+<style>
+.uc-overlay {
+    position: fixed;
+    inset: 0;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    background: rgba(255,255,255,0.25);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.uc-card {
+    background: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 2.5rem 3.5rem;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+    max-width: 460px;
+}
+.uc-card h2 { margin: 0 0 0.75rem 0; font-size: 1.5rem; color: #1a1a1a; font-weight: 600; }
+.uc-card p  { margin: 0; color: #555; font-size: 0.92rem; line-height: 1.6; }
+</style>
+<div class="uc-overlay">
+    <div class="uc-card">
+        <h2>Under Construction</h2>
+        <p>Scoring model and data validation are in progress.<br>Check back soon.</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
+
 st.title("Recruiting Board")
-st.caption(
-    "Ranks athletes by a consistency-weighted composite. "
-    "A skier who logs 40 FIS points reliably scores higher than one who peaks "
-    "at 38 but falls off to 55+ regularly."
+
+st.markdown(
+    "Raw FIS points tell you how an athlete finished on their best day. "
+    "They don't tell you how reliably they hit that level. "
+    "This board surfaces consistent performers — athletes who post a stable "
+    "number race after race rank above those with one standout result surrounded "
+    "by blown runs and DNFs. Ranking is relative to the filtered cohort; "
+    "switch the year filter to compare athletes within a single birth year class."
 )
 
-# Load data once
+# Load data
 with st.spinner("Loading athlete data..."):
     df_all = load_recruiting_data()
 
 if df_all.empty:
     st.error("No data available.")
     st.stop()
+
 
 # ---------------------------------------------------------------------------
 # Sidebar filters
@@ -195,68 +223,107 @@ else:
 
 min_races = st.sidebar.slider("Minimum races", min_value=3, max_value=30, value=5)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown(
-    "**Scout Rating formula**\n\n"
-    "```\nraw = mean_fis\n"
-    "    + 0.75 × std_fis\n"
-    "    + dnf_rate × 50\n```\n"
-    "Lower raw score → higher rating (1–100). "
-    "Std penalty rewards athletes who perform the same level every time."
-)
 
 # ---------------------------------------------------------------------------
-# Apply filters
+# Apply filters (gender, discipline, level, cohort, min races)
 # ---------------------------------------------------------------------------
 
 df = df_all.copy()
 
-# Gender
 df = df[df["sex"] == gender_choice]
 
-# Discipline
 if disc_choice != "All":
     df = df[df["discipline"] == disc_choice]
 
-# Race level
 race_types = RACE_LEVEL_GROUPS[level_choice]
 if race_types is not None:
     df = df[df["race_type"].isin(race_types)]
 
-# YOB range
 if yob_range is not None:
     df = df[df["yob"].between(yob_range[0], yob_range[1])]
 
-# Min races
 df = df[df["race_count"] >= min_races]
 
 if df.empty:
     st.info("No athletes match the current filters. Try relaxing the requirements.")
     st.stop()
 
-# When a single athlete has stats for multiple disciplines or race types,
-# they appear multiple times. For the recruiting board we want one row per
-# athlete (the highest-level discipline row, or the one with most races).
-# De-dup: keep the row with the most races per fis_code.
+# Keep one row per athlete — the discipline/level combo with most races
 df = df.sort_values("race_count", ascending=False).drop_duplicates("fis_code")
 
-# Compute scores within this filtered cohort
+
+# ---------------------------------------------------------------------------
+# Year split filter (above the table, inline)
+# ---------------------------------------------------------------------------
+
+available_years = sorted(df["yob"].dropna().astype(int).unique())
+year_options = ["All years"] + [str(y) for y in available_years]
+
+year_col, _ = st.columns([2, 5])
+with year_col:
+    year_choice = st.selectbox(
+        "Rank within birth year",
+        year_options,
+        help="Narrows the ranking pool to a single birth year. Scout Ratings recalculate within that group.",
+    )
+
+if year_choice != "All years":
+    df = df[df["yob"] == int(year_choice)]
+
+if df.empty:
+    st.info("No athletes for this birth year with the current filters.")
+    st.stop()
+
+
+# ---------------------------------------------------------------------------
+# Score and rank
+# ---------------------------------------------------------------------------
+
 df = compute_scout_rating(df)
 df = df.sort_values("scout_rating", ascending=False).reset_index(drop=True)
-df.index += 1  # 1-based rank
+df.index += 1
 df.index.name = "Rank"
+
 
 # ---------------------------------------------------------------------------
 # Cohort summary
 # ---------------------------------------------------------------------------
 
-col1, col2, col3, col4 = st.columns(4)
-col1.metric("Athletes in cohort", len(df))
-col2.metric("Median mean FIS", f"{df['mean_fis'].median():.1f}")
-col3.metric("Median std FIS", f"{df['std_fis'].median():.1f}")
-col4.metric("Median DNF%", f"{df['dnf_pct'].median():.1f}%")
+c1, c2, c3, c4 = st.columns(4)
+cohort_label = year_choice if year_choice != "All years" else cohort_choice.split("(")[0].strip()
+c1.metric("Athletes ranked", len(df))
+c2.metric("Median mean FIS", f"{df['mean_fis'].median():.1f}")
+c3.metric("Median std FIS", f"{df['std_fis'].median():.1f}")
+c4.metric("Median DNF%", f"{df['dnf_pct'].median():.1f}%")
 
 st.divider()
+
+
+# ---------------------------------------------------------------------------
+# Ranking explanation — above the table
+# ---------------------------------------------------------------------------
+
+with st.expander("How Scout Rating is calculated", expanded=False):
+    st.markdown("""
+**Scout Rating** is a 0–100 composite score computed fresh for whoever is currently
+in the ranked pool. Adding or removing filters changes individual scores because
+ratings are relative — 100 always goes to the best athlete in the current group.
+
+| Component | Weight | Why it matters |
+|---|---|---|
+| Mean FIS points | 1.0× | Core result quality — lower is faster |
+| Std FIS points | 0.75× | Consistency penalty — high variance is punished |
+| DNF rate | ×50 pts | Reliability — finishing races is non-negotiable |
+
+**Formula:** `raw_score = mean_fis + 0.75 × std_fis + dnf_rate × 50`
+
+Scores are then ranked within the pool and scaled to 0–100.
+
+**Example:** An athlete averaging 40 FIS pts with a std of 3 scores a raw of **42.3**.
+An athlete averaging 38 but with a std of 15 scores a raw of **49.25** — ranked lower
+despite the better mean, because you can't rely on them to hit that level again.
+    """)
+
 
 # ---------------------------------------------------------------------------
 # Leaderboard table
@@ -297,23 +364,20 @@ st.dataframe(
     height=min(600, 40 + 35 * len(table)),
 )
 
+
 # ---------------------------------------------------------------------------
-# Scatter: consistency map
+# Consistency scatter
 # ---------------------------------------------------------------------------
 
 st.divider()
 st.subheader("Consistency Map")
 st.caption(
-    "Each bubble is an athlete. Left = lower mean FIS (faster). "
-    "Down = lower variability (more consistent). "
+    "Bottom-left = fast and consistent (target zone). "
     "Bubble size = race count. Color = Scout Rating."
 )
 
-plot_df = df.copy()
-plot_df["Age"] = CURRENT_YEAR - plot_df["yob"].fillna(0).astype(int)
-
 fig = px.scatter(
-    plot_df,
+    df,
     x="mean_fis",
     y="std_fis",
     size="race_count",
@@ -332,8 +396,8 @@ fig = px.scatter(
     range_color=[0, 100],
     size_max=30,
     labels={
-        "mean_fis": "Mean FIS Points (lower = faster)",
-        "std_fis": "Std FIS Points (lower = more consistent)",
+        "mean_fis": "Mean FIS Points",
+        "std_fis": "Std FIS Points",
         "scout_rating": "Scout Rating",
         "race_count": "Races",
     },
@@ -346,13 +410,3 @@ fig.update_layout(
     font=dict(size=12),
 )
 st.plotly_chart(fig, use_container_width=True)
-
-# ---------------------------------------------------------------------------
-# Bottom note
-# ---------------------------------------------------------------------------
-
-st.caption(
-    "Scout Rating is relative to the current filtered cohort — it changes when "
-    "filters change. Minimum races filter removes athletes with insufficient "
-    "data to score reliably."
-)

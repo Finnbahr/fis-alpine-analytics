@@ -29,11 +29,38 @@ st.set_page_config(
 
 st.title("Race Simulator")
 
-st.warning(
-    "**Under Construction** — This feature is not yet ready for use. "
-    "Full backtesting and model validation are in progress. Check back soon.",
-    icon=None,
-)
+st.markdown("""
+<style>
+.uc-overlay {
+    position: fixed;
+    inset: 0;
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    background: rgba(255,255,255,0.25);
+    z-index: 99999;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+.uc-card {
+    background: #ffffff;
+    border: 1px solid #e0e0e0;
+    border-radius: 10px;
+    padding: 2.5rem 3.5rem;
+    text-align: center;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.12);
+    max-width: 460px;
+}
+.uc-card h2 { margin: 0 0 0.75rem 0; font-size: 1.5rem; color: #1a1a1a; font-weight: 600; }
+.uc-card p  { margin: 0; color: #555; font-size: 0.92rem; line-height: 1.6; }
+</style>
+<div class="uc-overlay">
+    <div class="uc-card">
+        <h2>Under Construction</h2>
+        <p>Full backtesting and model validation are in progress.<br>Check back soon.</p>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 st.caption(
     "Upload a start list and the simulator builds a probabilistic finish-order prediction "
