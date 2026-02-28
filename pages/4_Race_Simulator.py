@@ -28,6 +28,13 @@ st.set_page_config(
 )
 
 st.title("Race Simulator")
+
+st.warning(
+    "**Under Construction** — This feature is not yet ready for use. "
+    "Full backtesting and model validation are in progress. Check back soon.",
+    icon=None,
+)
+
 st.caption(
     "Upload a start list and the simulator builds a probabilistic finish-order prediction "
     "using each athlete's historical Z-score distribution at this venue. "
