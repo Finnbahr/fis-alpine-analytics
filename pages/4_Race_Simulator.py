@@ -115,11 +115,6 @@ with st.expander("Model Accuracy — Backtesting Results"):
           finishers. In a 65-athlete field, being off by 8 positions on average represents a
           significant improvement over simply predicting bib order (which averages 9.3–10.3
           positions of error).
-
-        Giant Slalom and Downhill show the highest winner accuracy because those disciplines
-        have more consistent, predictable specialists. Slalom is harder to predict due to
-        course deterioration and higher DNF rates; Super G due to the single-run format and
-        historically distributed winner pool.
         """
     )
 
