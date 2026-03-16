@@ -39,62 +39,80 @@ with st.expander("How the Simulator Works"):
 
         **Building each athlete's profile**
 
-        Every athlete's recent race results are converted into a standardized performance measure
-        (z-score) relative to the field they competed against. The model then applies six
-        adjustments on top of that baseline before any simulation runs:
+        Every athlete's recent race results are converted into a standardised performance score
+        (z-score) relative to the field they competed against. An exponentially weighted mean
+        with a discipline-specific decay rate forms the baseline — Slalom form decays faster
+        (half-life ~120 days) while Downhill specialist form persists longer (~270 days). That
+        baseline is then shrunk toward the field mean using Bayesian shrinkage, so athletes with
+        few career starts are not over-rated on thin data.
 
-        - **Course profile** — how the athlete has performed on courses with similar characteristics
-          (vertical drop, gate count, pitch) to the selected venue
-        - **Bib / start number** — the statistical advantage or disadvantage of drawing an early bib,
-          based on historical bib-performance data at this location
-        - **Momentum** — whether the athlete is on an upswing or downswing based on recent results,
-          with more recent races weighted more heavily
-        - **Field quality** — a correction for the strength of the start list, since the same
-          performance means more against a deeper field
-        - **Venue** — the athlete's personal track record at this specific location across past seasons
-        - **Weather** — if conditions are entered, how each athlete has historically performed in
-          similar temperature, cloud cover, and precipitation conditions
+        Six adjustments are applied on top of that form baseline:
+
+        - **Form trajectory** — a weighted regression over recent results detects improving or
+          declining athletes. Applied to Slalom and Giant Slalom where short-term form swings are
+          most predictive; capped tighter for GS to avoid over-fitting.
+        - **Venue** — the athlete's personal track record at this specific location, shrinkage-
+          adjusted by the number of prior starts there. Athletes with limited venue history fall
+          back toward their general form.
+        - **Bib / start number** — the historical advantage or penalty of drawing a given start
+          position at this location, fitted per venue. Capped more tightly for single-run events
+          (Super G, Downhill) where bib order is less systematic.
+        - **Momentum** — the athlete's most recent result relative to their own form average,
+          normalised by career consistency. Captures hot/cold streaks not yet reflected in the
+          weighted mean.
+        - **Field quality** — a log-ratio correction for the depth of the start list. The same
+          absolute form score is worth more against a world-class field than a weaker one.
+        - **Weather** — if conditions are entered, each athlete's historical performance in
+          similar temperature, cloud cover, and precipitation bins is applied as an adjustment,
+          shrunk toward zero when the athlete has limited weather history.
+
+        **Bounce-back signal (Slalom only)**
+
+        When a Slalom athlete's last race was a DNF or DSQ, the model checks their historical
+        average performance in the race immediately after a DNF. Athletes with a strong bounce-back
+        record get a positive adjustment; athletes who tend to DNF consecutively are penalised.
 
         **Running the simulation**
 
-        Once each athlete's adjusted profile is set, the model runs 2,000 independent simulated
-        races. In each simulation, every athlete draws a performance from their own distribution —
-        centred on their adjusted form, with spread reflecting their historical consistency — and
-        the field is ranked. The fraction of times each athlete finishes 1st, top 3, or top 10
-        across those 2,000 races becomes their win, podium, and top-10 probability.
+        Once each athlete's adjusted mean and personal variance are set, the model runs 2,000
+        independent races. In each simulation every athlete draws a performance from their own
+        distribution and the field is ranked. For two-run disciplines (Slalom, Giant Slalom),
+        Run 1 results are used to reassign Run 2 bibs by FIS rules (top-30 reversed, 31+ in
+        order), and DNF probability is split across both runs. The fraction of times each athlete
+        finishes 1st, top 3, or top 10 across those 2,000 races becomes their win, podium,
+        and top-10 probability.
 
         **Interpreting the results**
 
-        A 35% win probability means that in similar conditions against a similar field, that athlete
-        would be expected to win roughly 35 times in every 100 starts — not that the model is wrong
-        when they finish third. All probabilities reflect the genuine uncertainty in the sport; no
-        simulation picks a guaranteed winner because none exist.
+        A 35% win probability means that under similar conditions against a similar field, that
+        athlete would be expected to win roughly 35 times in every 100 starts — not that the
+        model is wrong when they finish third. All probabilities reflect genuine uncertainty;
+        no simulation picks a guaranteed winner because none exist.
 
-        Results are sorted by win probability. The **Breakout Pick** highlights the athlete the model
-        rates significantly higher than their start bib suggests, based on the gap between their
-        bib rank and their predicted finish.
+        Results are sorted by win probability. The **Breakout Pick** highlights the athlete the
+        model rates significantly higher than their start bib suggests.
         """
     )
 
 with st.expander("Model Accuracy — Backtesting Results"):
     st.markdown(
         """
-        The model was validated by simulating **419 World Cup races** from the 2021 season to the
-        present — running each race using only data that existed before it was held, then comparing
-        predictions against actual results. No future information was used at any point.
+        The model was validated on **310 World Cup races from 2022 onward** — each race simulated
+        using only data available before race day, then compared against actual results.
+        No future information was used at any point.
 
-        Results by discipline (2,000 simulations per race, seed fixed for reproducibility):
+        Results by discipline (2,000 simulations per race, combined Men and Women):
         """
     )
 
     import pandas as _pd
     _bt = _pd.DataFrame({
-        "Discipline":    ["Slalom", "Giant Slalom", "Super G", "Downhill"],
-        "Races":         [119, 108, 92, 100],
-        "Winner Accuracy": ["30%", "41%", "19%", "20%"],
-        "Top-3 Recall":  ["43%", "43%", "37%", "34%"],
-        "Rank Correlation": ["0.61", "0.65", "0.69", "0.69"],
-        "Avg. Rank Error": ["8.3", "8.4", "7.5", "8.1"],
+        "Discipline":       ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+        "Races (M+W)":      [90, 79, 66, 75],
+        "Winner Accuracy":  ["34%", "46%", "21%", "24%"],
+        "Top-3 Recall":     ["42%", "42%", "38%", "35%"],
+        "Rank Correlation": ["0.612", "0.664", "0.686", "0.684"],
+        "Avg. Rank Error":  ["7.7", "7.3", "7.5", "8.0"],
     })
     st.dataframe(_bt, use_container_width=True, hide_index=True)
 
@@ -103,18 +121,17 @@ with st.expander("Model Accuracy — Backtesting Results"):
         **How to read these numbers:**
 
         - **Winner Accuracy** — the percentage of races where the model's top-ranked athlete
-          actually won. A random pick from a 65-athlete field would win 1.5% of the time;
-          the model achieves 19–41% depending on discipline.
-        - **Top-3 Recall** — how often the actual winner appears anywhere in the model's top-3
-          predictions. The model identifies the eventual winner as a top-3 contender in roughly
-          1 in 3 to 2 in 5 races.
-        - **Rank Correlation** — how well the full predicted ranking order matches the actual
-          finishing order (1.0 = perfect, 0 = no relationship). Values of 0.61–0.69 indicate
-          a strong, statistically significant relationship.
-        - **Avg. Rank Error** — on average, how many positions off the model is across all
-          finishers. In a 65-athlete field, being off by 8 positions on average represents a
-          significant improvement over simply predicting bib order (which averages 9.3–10.3
-          positions of error).
+          actually won. A random pick from a 60-athlete field would win roughly 1.7% of the time;
+          the model achieves 21–46% depending on discipline.
+        - **Top-3 Recall** — how often at least one of the actual podium athletes appears in the
+          model's predicted top 3. The model captures a podium athlete in the top 3 in roughly
+          35–42% of races.
+        - **Rank Correlation** — Spearman correlation between the full predicted and actual
+          finishing order among finishers (1.0 = perfect, 0 = no relationship). Values of
+          0.61–0.69 indicate a strong, statistically significant relationship.
+        - **Avg. Rank Error** — how many positions off the model is on average across all
+          finishers. In a 60-athlete field, an average error of 7–8 positions is a meaningful
+          improvement over predicting by bib order alone (which averages 9–10 positions of error).
         """
     )
 
