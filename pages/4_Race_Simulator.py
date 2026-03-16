@@ -107,12 +107,12 @@ with st.expander("Model Accuracy — Backtesting Results"):
 
     import pandas as _pd
     _bt = _pd.DataFrame({
-        "Discipline":       ["Slalom", "Giant Slalom", "Super G", "Downhill"],
-        "Races (M+W)":      [90, 79, 66, 75],
-        "Winner Accuracy":  ["34%", "46%", "21%", "24%"],
-        "Top-3 Recall":     ["42%", "42%", "38%", "35%"],
-        "Rank Correlation": ["0.612", "0.664", "0.686", "0.684"],
-        "Avg. Rank Error":  ["7.7", "7.3", "7.5", "8.0"],
+        "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+        "Races (M+W)":     [90, 79, 66, 75],
+        "Spearman Rho":    ["0.612", "0.664", "0.686", "0.684"],
+        "Winner %":        ["34%", "46%", "21%", "24%"],
+        "Top-3 %":         ["42%", "42%", "38%", "35%"],
+        "Avg. Rank Error": ["7.7", "7.3", "7.5", "8.0"],
     })
     st.dataframe(_bt, use_container_width=True, hide_index=True)
 
@@ -120,18 +120,15 @@ with st.expander("Model Accuracy — Backtesting Results"):
         """
         **How to read these numbers:**
 
-        - **Winner Accuracy** — the percentage of races where the model's top-ranked athlete
-          actually won. A random pick from a 60-athlete field would win roughly 1.7% of the time;
-          the model achieves 21–46% depending on discipline.
-        - **Top-3 Recall** — how often at least one of the actual podium athletes appears in the
-          model's predicted top 3. The model captures a podium athlete in the top 3 in roughly
-          35–42% of races.
-        - **Rank Correlation** — Spearman correlation between the full predicted and actual
-          finishing order among finishers (1.0 = perfect, 0 = no relationship). Values of
-          0.61–0.69 indicate a strong, statistically significant relationship.
-        - **Avg. Rank Error** — how many positions off the model is on average across all
-          finishers. In a 60-athlete field, an average error of 7–8 positions is a meaningful
-          improvement over predicting by bib order alone (which averages 9–10 positions of error).
+        - **Spearman Rho** — rank correlation between the full predicted and actual finishing order
+          among finishers (1.0 = perfect, 0 = no relationship). Values of 0.61–0.69 indicate a
+          strong, statistically significant relationship.
+        - **Winner %** — fraction of races where the model's top-ranked athlete actually won.
+          A random pick from a 60-athlete field would win roughly 1.7% of the time.
+        - **Top-3 %** — fraction of actual podium athletes captured in the model's predicted top 3.
+        - **Avg. Rank Error** — how many positions off the model is on average across all finishers.
+          In a 60-athlete field, an average error of 7–8 positions is a meaningful improvement over
+          predicting by bib order alone (which averages 9–10 positions of error).
         """
     )
 
