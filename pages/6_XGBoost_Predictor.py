@@ -1,7 +1,7 @@
 """
-Alpine Analytics — XGBoost Race Predictor
+Alpine Analytics — XGBoost Race Predictor (v11)
 
-Gradient-boosted tree model trained on all available World Cup race history.
+Gradient-boosted ranking model trained on all available World Cup race history.
 Upload a start list CSV to get an instant predicted ranking with key
 performance indicators per athlete.
 """
@@ -14,9 +14,7 @@ import plotly.graph_objects as go
 import pandas as pd
 import numpy as np
 from datetime import date
-import xgboost as xgb
-from database import get_engine
-from sqlalchemy import text
+import xgboost_model_v11 as v11
 
 st.set_page_config(
     page_title="XGBoost Predictor — Alpine Analytics",
@@ -40,227 +38,75 @@ st.title("XGBoost Race Predictor")
 with st.expander("How This Model Works"):
     st.markdown(
         """
-        The XGBoost predictor uses a gradient-boosted tree model trained on every World Cup
-        race in the database. Rather than simulating thousands of outcomes, it predicts each
-        athlete's expected performance score directly and ranks the field accordingly.
+        The XGBoost predictor uses a gradient-boosted ranking model (XGBRanker) trained on
+        every World Cup race in the database. Rather than simulating thousands of outcomes,
+        it predicts each athlete's expected performance score directly and ranks the field.
 
         **Features used per athlete**
 
-        - **FIS Points** — current world ranking score (lower = better ranked athlete)
-        - **Bib / start number** — draw position and its historical performance effect
-        - **Rolling form** — mean z-score over the last 5 and 10 races in this discipline
-        - **Consistency** — standard deviation of z-scores over the last 5 races
-        - **DNF rate** — fraction of DNFs / DSQs over the last 5 starts
-        - **Career depth** — total number of prior starts in this discipline
+        - **EWM form** — exponentially weighted mean z-score (discipline-specific halflife) and short/long variants
+        - **Rolling averages** — mean z-score over last 3, 5, and 10 races
+        - **Recent wins and podiums** — win rate and podium rate over last 5, 10, and career races
+        - **Consistency** — standard deviation of z-scores, CV ratio, consecutive podiums/wins
+        - **Form trajectory** — weighted least-squares slope of recent performance (Slalom & GS only)
+        - **DNF/DSQ risk** — rolling 5-race DNF rate, career DNF rate, consecutive DNF probability
+        - **Bounce-back** — historical z-score in the race after a DNF (Slalom only)
+        - **Venue history** — shrinkage-adjusted athlete average at this specific location
+        - **Bib position** — start order and its historical performance signal
+        - **FIS Points** — rolling 5 and 10-race FIS ranking score
         - **Days since last race** — recency of competition
-        - **Venue history** — athlete's personal average z-score at this specific location
-        - **Venue starts** — how many times they have raced here previously
-        - **Month** — seasonal timing within the race calendar
+        - **Weather** — optional athlete weather performance signal (temperature, cloud, precipitation)
+        - **Field-relative features** — each stat expressed relative to the current field mean
 
         **Training**
 
-        The model is trained on the full race database — every athlete, every race, no holdout.
-        Features are computed using only information available before each race (rolling windows
-        are lagged by one race to prevent leakage).
+        The model is trained on the full race database using only information available before
+        each race (all rolling features are lagged by one race to prevent look-ahead bias).
+        Per-discipline hyperparameters are tuned separately for Slalom, Giant Slalom, Super G,
+        and Downhill.
 
         **Interpreting the output**
 
-        Athletes are ranked by their predicted performance score (higher = faster). The score
-        is in z-score units — a value of +1.5 represents a top-tier performance, 0 is field
-        average, and negative values indicate below-average expected output. The ranking is a
-        point estimate, not a probability distribution.
+        Athletes are ranked by their predicted ranking score (higher = faster). The score is
+        a relative ranking signal — the absolute value is less important than the ordering.
         """
     )
 
 with st.expander("Model Accuracy — Backtesting Results"):
     st.markdown(
         """
-        Validated on World Cup races from 2021 onward — predictions made using only data
-        available before each race, compared against actual results.
+        Walk-forward validation: trained on 2020–2021 seasons, tested on every race from
+        2022 onward. Predictions made using only data available before each race.
         """
     )
     _bt = pd.DataFrame({
-        "Discipline":       ["Slalom", "Giant Slalom", "Super G", "Downhill"],
-        "Races (M / W)":    ["60 / 53", "48 / 50", "41 / 48", "52 / 47"],
-        "Rho (M / W)":      ["0.917 / 0.917", "0.950 / 0.975", "0.953 / 0.958", "0.912 / 0.946"],
-        "Winner % (M / W)": ["75% / 94%", "94% / 62%", "81% / 83%", "77% / 68%"],
-        "Top-3 % (M / W)":  ["83% / 84%", "92% / 91%", "83% / 81%", "82% / 84%"],
+        "Discipline":   ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+        "Races (M+W)":  [90, 79, 67, 75],
+        "Spearman Rho": ["0.604", "0.682", "0.716", "0.720"],
+        "Winner %":     ["35.7%", "43.4%", "31.6%", "27.8%"],
+        "Top-3 %":      ["49.3%", "50.9%", "42.0%", "40.8%"],
     })
     st.dataframe(_bt, use_container_width=True, hide_index=True)
     st.caption(
         "Rho = Spearman rank correlation between predicted and actual finishing order among "
-        "finishers only (excludes DNFs). Winner % = fraction of races where the model's "
-        "top-ranked athlete actually won."
+        "finishers only (excludes DNFs/DSQs). Winner % = fraction of races where the "
+        "model's top-ranked athlete actually won. Top-3 % = fraction of actual podium "
+        "athletes captured in the model's predicted top 3."
     )
 
 # ---------------------------------------------------------------------------
-# Cached loaders
+# Cached wrappers around v11
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=604800, show_spinner=False)
-def load_history(discipline: str, sex: str) -> pd.DataFrame:
-    """Load full WC race history with rolling features. Cached weekly."""
-    engine = get_engine()
-    q = text("""
-        SELECT
-            fr.fis_code::text              AS fis_code,
-            fr.race_id,
-            rz.race_z_score::float         AS race_z_score,
-            rd.date,
-            rd.location,
-            fr.bib::int                    AS bib,
-            fr.fis_points::float           AS fis_points,
-            fr.rank                        AS rank_str
-        FROM raw.fis_results fr
-        JOIN raw.race_details rd ON rd.race_id = fr.race_id
-        LEFT JOIN race_aggregate.race_z_score rz
-               ON rz.race_id = fr.race_id AND rz.fis_code = fr.fis_code
-        WHERE rd.discipline = :disc AND rd.race_type = 'World Cup' AND rd.sex = :sex
-        ORDER BY rd.date ASC, fr.race_id, fr.fis_code
-    """)
-    with engine.connect() as conn:
-        df = pd.read_sql(q, conn, params={"disc": discipline, "sex": sex})
-
-    df["date"]   = pd.to_datetime(df["date"])
-    df["is_dnf"] = df["rank_str"].astype(str).str.upper().str.startswith(("DNF", "DSQ", "DNS"))
-
-    df = df.sort_values(["fis_code", "date"]).reset_index(drop=True)
-    g  = df.groupby("fis_code")
-    df["roll5_mean_z"]   = g["race_z_score"].transform(lambda x: x.shift(1).rolling(5,  min_periods=1).mean())
-    df["roll10_mean_z"]  = g["race_z_score"].transform(lambda x: x.shift(1).rolling(10, min_periods=1).mean())
-    df["roll5_std_z"]    = g["race_z_score"].transform(lambda x: x.shift(1).rolling(5,  min_periods=2).std())
-    df["roll5_dnf_rate"] = g["is_dnf"].transform(       lambda x: x.shift(1).rolling(5,  min_periods=1).mean())
-    df["n_career"]       = g["race_z_score"].transform(lambda x: x.shift(1).expanding().count())
-    df["days_since"]     = g["date"].transform(          lambda x: x.diff().dt.days)
-
-    df = df.sort_values(["fis_code", "location", "date"]).reset_index(drop=True)
-    gv = df.groupby(["fis_code", "location"])
-    df["venue_mean_z"] = gv["race_z_score"].transform(lambda x: x.shift(1).expanding().mean())
-    df["venue_n"]      = gv["race_z_score"].transform(lambda x: x.shift(1).expanding().count())
-
-    df = df.sort_values(["date", "race_id", "fis_code"]).reset_index(drop=True)
-    df["month"] = df["date"].dt.month
-
-    df["fis_points"] = df["fis_points"].fillna(df["fis_points"].median())
-    df["bib"]        = df.groupby("race_id")["bib"].transform(lambda x: x.fillna(x.median()).fillna(30))
-    fp_max    = max(float(df["fis_points"].quantile(0.95)), 1.0)
-    fis_proxy = 1.0 - 2.0 * (df["fis_points"] / fp_max).clip(0, 1)
-    df["venue_mean_z"]   = df["venue_mean_z"].fillna(df["roll10_mean_z"])
-    df["venue_mean_z"]   = df["venue_mean_z"].fillna(df["roll5_mean_z"])
-    df["roll5_mean_z"]   = df["roll5_mean_z"].fillna(fis_proxy)
-    df["roll10_mean_z"]  = df["roll10_mean_z"].fillna(df["roll5_mean_z"])
-    df["venue_mean_z"]   = df["venue_mean_z"].fillna(df["roll5_mean_z"])
-    df["roll5_std_z"]    = df["roll5_std_z"].fillna(0.6)
-    df["roll5_dnf_rate"] = df["roll5_dnf_rate"].fillna(0.08)
-    df["n_career"]       = df["n_career"].fillna(0)
-    df["days_since"]     = df["days_since"].fillna(30)
-    df["venue_n"]        = df["venue_n"].fillna(0)
-
-    return df
+def cached_train(discipline: str, sex: str):
+    """Train v11 XGBRanker on full WC history. Returns (model, hist_df)."""
+    return v11.train(discipline, sex)
 
 
 @st.cache_data(ttl=604800, show_spinner=False)
-def train_model(discipline: str, sex: str):
-    """Train XGBoost on full WC history. Returns (model, fp_max)."""
-    df    = load_history(discipline, sex)
-    train = df[df["race_z_score"].notna()].copy()
-    if len(train) < 50:
-        return None, None
-    features = [
-        "fis_points", "bib", "roll5_mean_z", "roll10_mean_z",
-        "roll5_std_z", "roll5_dnf_rate", "n_career", "days_since",
-        "venue_mean_z", "venue_n", "month",
-    ]
-    model = xgb.XGBRegressor(
-        n_estimators=500, max_depth=4, learning_rate=0.05,
-        subsample=0.8, colsample_bytree=0.8, min_child_weight=3,
-        random_state=42, n_jobs=-1, verbosity=0,
-    )
-    model.fit(train[features].values, train["race_z_score"].values)
-    fp_max = max(float(df["fis_points"].quantile(0.95)), 1.0)
-    return model, fp_max
-
-
-@st.cache_data(ttl=604800, show_spinner=False)
-def list_venues(discipline: str, sex: str) -> list[str]:
-    engine = get_engine()
-    q = text("""
-        SELECT DISTINCT rd.location
-        FROM raw.race_details rd
-        WHERE rd.discipline = :disc AND rd.race_type = 'World Cup' AND rd.sex = :sex
-        ORDER BY rd.location
-    """)
-    with engine.connect() as conn:
-        df = pd.read_sql(q, conn, params={"disc": discipline, "sex": sex})
-    return df["location"].tolist()
-
-
-# ---------------------------------------------------------------------------
-# Feature builder for a single athlete (live prediction)
-# ---------------------------------------------------------------------------
-
-FEATURES = [
-    "fis_points", "bib", "roll5_mean_z", "roll10_mean_z",
-    "roll5_std_z", "roll5_dnf_rate", "n_career", "days_since",
-    "venue_mean_z", "venue_n", "month",
-]
-
-
-def build_athlete_features(
-    hist_df: pd.DataFrame,
-    fis_code: str,
-    bib: int,
-    venue: str,
-    race_month: int,
-    fallback_fis_points: float,
-    fp_max: float,
-) -> dict:
-    """Current feature state for one athlete using full history (no shift)."""
-    ath      = hist_df[hist_df["fis_code"] == fis_code]
-    finished = ath[ath["race_z_score"].notna()].sort_values("date")
-
-    if len(finished) == 0:
-        fis_pts   = fallback_fis_points if not np.isnan(fallback_fis_points) else fp_max
-        fis_proxy = float(np.clip(1.0 - 2.0 * (fis_pts / max(fp_max, 1.0)), -1.5, 1.5))
-        return {
-            "fis_points": fis_pts, "bib": bib,
-            "roll5_mean_z": fis_proxy, "roll10_mean_z": fis_proxy,
-            "roll5_std_z": 0.6, "roll5_dnf_rate": 0.08,
-            "n_career": 0, "days_since": 30.0,
-            "venue_mean_z": fis_proxy, "venue_n": 0.0,
-            "month": float(race_month),
-        }
-
-    zs          = finished["race_z_score"].values
-    all_sorted  = ath.sort_values("date")
-    dnfs        = all_sorted["is_dnf"].values
-    last_date   = finished["date"].iloc[-1]
-    days_since  = max(0, (pd.Timestamp.today() - last_date).days)
-    fis_pts     = float(all_sorted["fis_points"].iloc[-1])
-
-    roll5_z   = float(np.mean(zs[-5:]))
-    roll10_z  = float(np.mean(zs[-10:]))
-    roll5_std = float(np.std(zs[-5:], ddof=1)) if len(zs) >= 2 else 0.6
-    roll5_dnf = float(np.mean(dnfs[-5:])) if len(dnfs) >= 1 else 0.08
-    n_career  = len(zs)
-
-    venue_hist   = finished[finished["location"].str.strip().str.lower() == venue.strip().lower()]
-    venue_mean_z = float(venue_hist["race_z_score"].mean()) if len(venue_hist) > 0 else roll10_z
-    venue_n      = float(len(venue_hist))
-
-    return {
-        "fis_points":    fis_pts,
-        "bib":           float(bib),
-        "roll5_mean_z":  roll5_z,
-        "roll10_mean_z": roll10_z,
-        "roll5_std_z":   max(roll5_std, 0.0),
-        "roll5_dnf_rate": roll5_dnf,
-        "n_career":      float(n_career),
-        "days_since":    float(days_since),
-        "venue_mean_z":  venue_mean_z,
-        "venue_n":       venue_n,
-        "month":         float(race_month),
-    }
+def cached_list_venues(discipline: str, sex: str) -> list[str]:
+    return v11.list_venues(discipline, sex)
 
 
 # ---------------------------------------------------------------------------
@@ -269,11 +115,11 @@ def build_athlete_features(
 
 st.sidebar.header("Race Setup")
 
-sel_disc = st.sidebar.selectbox("Discipline", ["Slalom", "Giant Slalom", "Super G", "Downhill"])
+sel_disc  = st.sidebar.selectbox("Discipline", ["Slalom", "Giant Slalom", "Super G", "Downhill"])
 sex_label = st.sidebar.radio("Sex", ["Men (M)", "Women (F)"])
 sex_code  = "Men's" if sex_label.startswith("Men") else "Women's"
 
-venues = list_venues(sel_disc, sex_code)
+venues = cached_list_venues(sel_disc, sex_code)
 if venues:
     sel_venue = st.sidebar.selectbox("Venue", venues)
 else:
@@ -285,11 +131,27 @@ race_month = st.sidebar.number_input(
     help="Month the race is held — used as a seasonal signal.",
 )
 
+with st.sidebar.expander("Weather (optional)"):
+    temp_on  = st.checkbox("Set temperature", value=False)
+    temp_val = st.slider("Air temperature (°C)", -20, 10, -5, disabled=not temp_on)
+    cloud_on = st.checkbox("Set cloud cover", value=False)
+    cloud_val= st.slider("Cloud cover (%)", 0, 100, 50, disabled=not cloud_on)
+    precip_on= st.checkbox("Set precipitation", value=False)
+    precip_val=st.number_input("Precipitation (mm, 24h)", 0.0, 50.0, 0.0, 0.5, disabled=not precip_on)
+
+weather_dict = {}
+if temp_on:
+    weather_dict["air_temp_c"]    = float(temp_val)
+if cloud_on:
+    weather_dict["cloud_cover"]   = float(cloud_val)
+if precip_on:
+    weather_dict["precip_24h_mm"] = float(precip_val)
+
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Model trained on all available World Cup race history.  \n"
-    "Features include recent form (5 and 10-race rolling average), "
-    "venue history, bib position, DNF rate, and FIS ranking."
+    "Model v11 — trained on all available World Cup history.  \n"
+    "XGBRanker with discipline-specific hyperparameters, EWM form, "
+    "venue history, DNF risk, form trajectory, and weather signals."
 )
 
 # ---------------------------------------------------------------------------
@@ -302,8 +164,7 @@ col_info, col_tmpl = st.columns([3, 1])
 with col_info:
     st.markdown(
         "Upload a CSV with **Bib** and **FIS_Code** columns. "
-        "An optional **Name** column sets athlete display names. "
-        "FIS points can be included as **FIS_Points** for athletes with no race history."
+        "An optional **Name** column sets athlete display names."
     )
 with col_tmpl:
     template_csv = "Bib,FIS_Code,Name\n1,422304,KRISTOFFERSEN Henrik\n2,512182,MEILLARD Loic\n3,6190403,NOEL Clement\n"
@@ -337,11 +198,9 @@ if uploaded is not None:
 
             if "name" not in raw_df.columns:
                 raw_df["name"] = raw_df["fis_code"]
-            if "fis_points" not in raw_df.columns:
-                raw_df["fis_points"] = float("nan")
 
             start_list = (
-                raw_df[["bib", "fis_code", "name", "fis_points"]]
+                raw_df[["bib", "fis_code", "name"]]
                 .drop_duplicates(subset=["bib"])
                 .sort_values("bib")
                 .reset_index(drop=True)
@@ -365,180 +224,172 @@ if start_list is not None:
 
     if run:
         with st.spinner("Loading race history and training model..."):
-            hist_df = load_history(sel_disc, sex_code)
-            model, fp_max = train_model(sel_disc, sex_code)
+            model, hist_df = cached_train(sel_disc, sex_code)
 
-        if model is None:
-            st.error("Insufficient training data for this discipline / sex combination.")
+        with st.spinner("Building athlete features and predicting..."):
+            pred_df = v11.predict(
+                model              = model,
+                hist_df            = hist_df,
+                start_list         = start_list,
+                venue              = sel_venue or "",
+                race_month         = int(race_month),
+                weather_conditions = weather_dict or None,
+                discipline         = sel_disc,
+            )
+            pred_df = pred_df.rename(columns={"rank": "#"})
+
+        # ----------------------------------------------------------------
+        # Summary metrics
+        # ----------------------------------------------------------------
+        st.markdown("---")
+        st.subheader("Predicted Ranking")
+
+        winner_row     = pred_df.iloc[0]
+        top3_lastnames = " / ".join(n.split()[-1] for n in pred_df.head(3)["name"].tolist())
+
+        # Breakout: biggest gap between bib rank and predicted rank (bib > 5 only)
+        pred_df["_bib_rank"] = pred_df["bib"].rank(method="min").astype(int)
+        pred_df["_improve"]  = pred_df["_bib_rank"] - pred_df["#"]
+        outsiders = pred_df[pred_df["_bib_rank"] > 5]
+        if not outsiders.empty and outsiders["_improve"].max() > 0:
+            breakout       = outsiders.nlargest(1, "_improve").iloc[0]
+            breakout_name  = breakout["name"]
+            breakout_delta = f"Bib {int(breakout['bib'])} → Pred. #{int(breakout['#'])}"
         else:
-            with st.spinner("Building athlete features and predicting..."):
-                rows = []
-                for _, sl_row in start_list.iterrows():
-                    fis_code = str(sl_row["fis_code"]).strip()
-                    feats = build_athlete_features(
-                        hist_df        = hist_df,
-                        fis_code       = fis_code,
-                        bib            = int(sl_row["bib"]),
-                        venue          = sel_venue or "",
-                        race_month     = int(race_month),
-                        fallback_fis_points = float(sl_row["fis_points"]),
-                        fp_max         = fp_max,
-                    )
-                    feats["fis_code"] = fis_code
-                    feats["name"]     = str(sl_row["name"])
-                    rows.append(feats)
+            breakout       = pred_df.iloc[1]
+            breakout_name  = breakout["name"]
+            breakout_delta = f"Score: {breakout['pred_score']:.2f}"
 
-                pred_df = pd.DataFrame(rows)
-                X = pred_df[FEATURES].values
-                pred_df["pred_z"] = model.predict(X)
-                pred_df = pred_df.sort_values("pred_z", ascending=False).reset_index(drop=True)
-                pred_df.insert(0, "#", range(1, len(pred_df) + 1))
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Predicted Winner", winner_row["name"], f"Score: {winner_row['pred_score']:.2f}")
+        m2.metric("Top-3 Favorites", top3_lastnames)
+        m3.metric("Breakout Pick", breakout_name, breakout_delta)
 
-            # ----------------------------------------------------------------
-            # Summary metrics
-            # ----------------------------------------------------------------
-            st.markdown("---")
-            st.subheader("Predicted Ranking")
+        # ----------------------------------------------------------------
+        # Results table
+        # ----------------------------------------------------------------
+        display = pred_df[["#", "bib", "name", "pred_score", "ewm_shrunk",
+                            "venue_shrunk", "form_slope", "weather_adj",
+                            "venue_n", "n_career"]].copy()
+        display["pred_score"]  = display["pred_score"].round(3)
+        display["ewm_shrunk"]  = display["ewm_shrunk"].round(3)
+        display["venue_shrunk"]= display["venue_shrunk"].round(3)
+        display["form_slope"]  = display["form_slope"].round(3)
+        display["weather_adj"] = display["weather_adj"].round(3)
+        display["venue_n"]     = display["venue_n"].astype(int)
+        display["n_career"]    = display["n_career"].astype(int)
 
-            winner_row     = pred_df.iloc[0]
-            top3_lastnames = " / ".join(n.split()[-1] for n in pred_df.head(3)["name"].tolist())
+        st.dataframe(
+            display.rename(columns={
+                "#":            "#",
+                "bib":          "Bib",
+                "name":         "Athlete",
+                "pred_score":   "Pred. Score",
+                "ewm_shrunk":   "EWM Form",
+                "venue_shrunk": "Venue Avg",
+                "form_slope":   "Form Trend",
+                "weather_adj":  "Weather Adj",
+                "venue_n":      "Venue Starts",
+                "n_career":     "Career Starts",
+            }),
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "#":            st.column_config.NumberColumn("#",            help="Predicted rank"),
+                "Bib":          st.column_config.NumberColumn("Bib"),
+                "Athlete":      st.column_config.TextColumn("Athlete"),
+                "Pred. Score":  st.column_config.NumberColumn("Pred. Score", help="Ranking score — higher is better", format="%.3f"),
+                "EWM Form":     st.column_config.NumberColumn("EWM Form",    help="Shrinkage-adjusted exponentially weighted mean z-score. Positive = above average", format="%.3f"),
+                "Venue Avg":    st.column_config.NumberColumn("Venue Avg",   help="Shrinkage-adjusted mean z-score at this venue", format="%.3f"),
+                "Form Trend":   st.column_config.NumberColumn("Form Trend",  help="Recent form trajectory (positive = improving). Applied for SL and GS only.", format="%.3f"),
+                "Weather Adj":  st.column_config.NumberColumn("Weather Adj", help="Weather performance adjustment (0 if no weather set or no athlete weather history)", format="%.3f"),
+                "Venue Starts": st.column_config.NumberColumn("Venue Starts",help="Prior World Cup starts at this venue"),
+                "Career Starts":st.column_config.NumberColumn("Career Starts",help="Total prior WC starts in this discipline"),
+            },
+        )
 
-            # Breakout: biggest gap between bib rank and predicted rank (bib > 5 only)
-            pred_df["_bib_rank"] = pred_df["bib"].rank(method="min").astype(int)
-            pred_df["_improve"]  = pred_df["_bib_rank"] - pred_df["#"]
-            outsiders = pred_df[pred_df["_bib_rank"] > 5]
-            if not outsiders.empty and outsiders["_improve"].max() > 0:
-                breakout     = outsiders.nlargest(1, "_improve").iloc[0]
-                breakout_name  = breakout["name"]
-                breakout_delta = f"Bib {int(breakout['bib'])} → Pred. #{int(breakout['#'])}"
-            else:
-                breakout       = pred_df.iloc[1]
-                breakout_name  = breakout["name"]
-                breakout_delta = f"Pred. z = {breakout['pred_z']:.2f}"
+        # ----------------------------------------------------------------
+        # Predicted score bar chart — top 15
+        # ----------------------------------------------------------------
+        st.markdown("#### Predicted Score — Top 15")
 
-            m1, m2, m3 = st.columns(3)
-            m1.metric("Predicted Winner", winner_row["name"], f"z = {winner_row['pred_z']:.2f}")
-            m2.metric("Top-3 Favorites", top3_lastnames)
-            m3.metric("Breakout Pick", breakout_name, breakout_delta)
+        chart_df = pred_df.head(15).sort_values("pred_score", ascending=True)
+        colors   = ["#1a3a6b" if i == len(chart_df) - 1 else "steelblue"
+                    for i in range(len(chart_df))]
 
-            # ----------------------------------------------------------------
-            # Results table
-            # ----------------------------------------------------------------
-            display = pred_df[["#", "bib", "name", "pred_z", "roll5_mean_z", "roll5_dnf_rate", "venue_n", "n_career"]].copy()
-            display["pred_z"]        = display["pred_z"].round(3)
-            display["roll5_mean_z"]  = display["roll5_mean_z"].round(3)
-            display["roll5_dnf_rate"] = (display["roll5_dnf_rate"] * 100).round(1).astype(str) + "%"
-            display["venue_n"]       = display["venue_n"].astype(int)
-            display["n_career"]      = display["n_career"].astype(int)
+        fig = go.Figure(go.Bar(
+            y           = chart_df["name"],
+            x           = chart_df["pred_score"],
+            orientation = "h",
+            marker_color= colors,
+            opacity     = 0.85,
+            hovertemplate = "<b>%{y}</b><br>Pred. Score: %{x:.3f}<extra></extra>",
+        ))
+        fig.update_layout(
+            xaxis  = dict(title="Predicted ranking score (higher = faster)"),
+            yaxis  = dict(title="", automargin=True),
+            height = max(320, 28 * len(chart_df)),
+            margin = dict(l=170, r=40, t=20, b=50),
+            plot_bgcolor  = "white",
+            paper_bgcolor = "white",
+        )
+        fig.update_xaxes(showgrid=True, gridcolor="#eee")
+        fig.update_yaxes(showgrid=False)
+        st.plotly_chart(fig, use_container_width=True)
 
-            st.dataframe(
-                display.rename(columns={
-                    "#":              "#",
-                    "bib":            "Bib",
-                    "name":           "Athlete",
-                    "pred_z":         "Pred. Score",
-                    "roll5_mean_z":   "5-Race Form",
-                    "roll5_dnf_rate": "DNF Rate",
-                    "venue_n":        "Venue Starts",
-                    "n_career":       "Career Starts",
-                }),
-                use_container_width=True,
-                hide_index=True,
-                column_config={
-                    "#":             st.column_config.NumberColumn("#",             help="Predicted rank"),
-                    "Bib":           st.column_config.NumberColumn("Bib"),
-                    "Athlete":       st.column_config.TextColumn("Athlete"),
-                    "Pred. Score":   st.column_config.NumberColumn("Pred. Score",  help="Predicted z-score — higher is better. Field average ≈ 0, winner ≈ +1.5", format="%.3f"),
-                    "5-Race Form":   st.column_config.NumberColumn("5-Race Form",  help="Mean z-score over last 5 races. Positive = above average", format="%.3f"),
-                    "DNF Rate":      st.column_config.TextColumn("DNF Rate",       help="Fraction of DNF / DSQ in last 5 starts"),
-                    "Venue Starts":  st.column_config.NumberColumn("Venue Starts", help="Prior World Cup starts at this venue"),
-                    "Career Starts": st.column_config.NumberColumn("Career Starts",help="Total prior WC starts in this discipline"),
-                },
-            )
+        # ----------------------------------------------------------------
+        # EWM form vs venue chart
+        # ----------------------------------------------------------------
+        st.markdown("#### EWM Form vs Venue History — Top 20")
+        scatter_df = pred_df.head(20)
 
-            # ----------------------------------------------------------------
-            # Predicted score bar chart — top 15
-            # ----------------------------------------------------------------
-            st.markdown("#### Predicted Score — Top 15")
+        fig2 = go.Figure()
+        fig2.add_trace(go.Scatter(
+            x    = scatter_df["ewm_shrunk"],
+            y    = scatter_df["venue_shrunk"],
+            mode = "markers+text",
+            text = scatter_df["name"].str.split().str[-1],
+            textposition = "top center",
+            textfont     = dict(size=10),
+            marker       = dict(
+                size  = 10,
+                color = scatter_df["pred_score"],
+                colorscale = "Blues",
+                showscale  = True,
+                colorbar   = dict(title="Pred. Score"),
+            ),
+            hovertemplate = (
+                "<b>%{text}</b><br>"
+                "EWM Form: %{x:.3f}<br>"
+                "Venue Avg: %{y:.3f}<extra></extra>"
+            ),
+        ))
+        fig2.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.4)
+        fig2.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.4)
+        fig2.update_layout(
+            xaxis  = dict(title="EWM Form (z-score, shrunk)"),
+            yaxis  = dict(title="Venue Average (z-score, shrunk)"),
+            height = 420,
+            margin = dict(l=60, r=40, t=20, b=60),
+            plot_bgcolor  = "white",
+            paper_bgcolor = "white",
+        )
+        fig2.update_xaxes(showgrid=True, gridcolor="#eee")
+        fig2.update_yaxes(showgrid=True, gridcolor="#eee")
+        st.plotly_chart(fig2, use_container_width=True)
 
-            chart_df = pred_df.head(15).sort_values("pred_z", ascending=True)
-            colors   = ["#1a3a6b" if i == len(chart_df) - 1 else "steelblue"
-                        for i in range(len(chart_df))]
-
-            fig = go.Figure(go.Bar(
-                y           = chart_df["name"],
-                x           = chart_df["pred_z"],
-                orientation = "h",
-                marker_color= colors,
-                opacity     = 0.85,
-                hovertemplate = "<b>%{y}</b><br>Pred. Score: %{x:.3f}<extra></extra>",
-            ))
-            fig.update_layout(
-                xaxis  = dict(title="Predicted z-score (higher = faster)"),
-                yaxis  = dict(title="", automargin=True),
-                height = max(320, 28 * len(chart_df)),
-                margin = dict(l=170, r=40, t=20, b=50),
-                plot_bgcolor  = "white",
-                paper_bgcolor = "white",
-            )
-            fig.update_xaxes(showgrid=True, gridcolor="#eee")
-            fig.update_yaxes(showgrid=False)
-            st.plotly_chart(fig, use_container_width=True)
-
-            # ----------------------------------------------------------------
-            # Form vs venue chart
-            # ----------------------------------------------------------------
-            st.markdown("#### 5-Race Form vs Venue History — Top 20")
-            scatter_df = pred_df.head(20)
-
-            fig2 = go.Figure()
-            fig2.add_trace(go.Scatter(
-                x    = scatter_df["roll5_mean_z"],
-                y    = scatter_df["venue_mean_z"],
-                mode = "markers+text",
-                text = scatter_df["name"].str.split().str[-1],
-                textposition = "top center",
-                textfont     = dict(size=10),
-                marker       = dict(
-                    size  = 10,
-                    color = scatter_df["pred_z"],
-                    colorscale = "Blues",
-                    showscale  = True,
-                    colorbar   = dict(title="Pred. Score"),
-                ),
-                hovertemplate = (
-                    "<b>%{text}</b><br>"
-                    "5-Race Form: %{x:.3f}<br>"
-                    "Venue Avg:   %{y:.3f}<extra></extra>"
-                ),
-            ))
-            fig2.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.4)
-            fig2.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.4)
-            fig2.update_layout(
-                xaxis  = dict(title="5-Race Form (z-score)"),
-                yaxis  = dict(title="Venue Average (z-score)"),
-                height = 420,
-                margin = dict(l=60, r=40, t=20, b=60),
-                plot_bgcolor  = "white",
-                paper_bgcolor = "white",
-            )
-            fig2.update_xaxes(showgrid=True, gridcolor="#eee")
-            fig2.update_yaxes(showgrid=True, gridcolor="#eee")
-            st.plotly_chart(fig2, use_container_width=True)
-
-            # ----------------------------------------------------------------
-            # Export
-            # ----------------------------------------------------------------
-            export_cols = ["#", "bib", "name", "pred_z", "roll5_mean_z",
-                           "roll10_mean_z", "roll5_std_z", "roll5_dnf_rate",
-                           "venue_n", "n_career"]
-            csv_out = pred_df[export_cols].to_csv(index=False)
-            st.download_button(
-                "Download predictions CSV",
-                data     = csv_out,
-                file_name= f"xgb_{sel_disc.lower().replace(' ','_')}_{sel_venue or 'venue'}.csv",
-                mime     = "text/csv",
-            )
+        # ----------------------------------------------------------------
+        # Export
+        # ----------------------------------------------------------------
+        export_cols = ["#", "bib", "name", "pred_score", "ewm_shrunk",
+                       "venue_shrunk", "venue_n", "form_slope", "weather_adj", "n_career"]
+        csv_out = pred_df[[c for c in export_cols if c in pred_df.columns]].to_csv(index=False)
+        st.download_button(
+            "Download predictions CSV",
+            data     = csv_out,
+            file_name= f"xgb_v11_{sel_disc.lower().replace(' ','_')}_{sel_venue or 'venue'}.csv",
+            mime     = "text/csv",
+        )
 
 else:
     st.info(

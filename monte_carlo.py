@@ -64,7 +64,11 @@ MOMENTUM_WEIGHT   = 0.15    # fraction of momentum_z applied to adjusted mean
 
 # ── New feature constants (test) ──────────────────────────────────────────────
 SLOPE_WEIGHT      = 14.0    # days — extrapolate trend 14 days forward
-SLOPE_CAP         = 0.25    # max ±0.25 z contribution from form trajectory
+SLOPE_CAP         = 0.25    # max ±z contribution from form trajectory (fallback; see SLOPE_CAP_BY_DISC)
+SLOPE_CAP_BY_DISC = {
+    "Slalom":       0.25,   # SL: slope is strong signal; full ±0.25 cap confirmed by A/B
+    "Giant Slalom": 0.10,   # GS: tighter cap — A/B: improves rho +0.016, MAE -1.17 vs disabled; no winner% loss
+}
 BOUNCE_WEIGHT     = 0.25    # weight on bounce_back_z_score when athlete had recent DNF
 MEAN_SHRINK_K     = 3       # Bayesian shrinkage: wm_z * n/(n+K); K=3 → n=10 retains 77%, n=1 retains 25%
 
@@ -81,7 +85,7 @@ CV_POP_STD        = {       # population median std_race_z_score (from performan
 }
 
 # Per-discipline feature gates — controls which new signals are active.
-_SLOPE_ENABLED  = {"Slalom"}                        # A/B confirmed: slope+bounce best for SL; hurts GS
+_SLOPE_ENABLED  = {"Slalom", "Giant Slalom"}         # A/B: SL full cap; GS tighter cap=0.10 (see SLOPE_CAP_BY_DISC)
 _BOUNCE_ENABLED = {"Slalom"}                        # bounce + re_dnf only for SL
 _CV_ENABLED     = {"Slalom", "Giant Slalom"}        # testing CV std-scaling for both technical events
 DECAY_HALFLIFE    = 180     # days; default recency-weighting half-life (overridden per discipline)
@@ -1258,7 +1262,8 @@ def assemble_adjusted_params(
                 if code in athlete_stats.index and "form_slope" in athlete_stats.columns
                 else 0.0
             )
-            slope_adj = float(np.clip(-form_slope * SLOPE_WEIGHT, -SLOPE_CAP, SLOPE_CAP))
+            cap = SLOPE_CAP_BY_DISC.get(discipline, SLOPE_CAP)
+            slope_adj = float(np.clip(-form_slope * SLOPE_WEIGHT, -cap, cap))
         else:
             slope_adj = 0.0
 
