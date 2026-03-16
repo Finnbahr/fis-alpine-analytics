@@ -75,32 +75,55 @@ with st.expander("How This Model Works"):
 with st.expander("Model Accuracy — Backtesting Results"):
     st.markdown(
         """
-        Walk-forward validation: trained on 2020–2021 seasons, tested on every race from
+        Walk-forward validation: trained on pre-2022 history, tested on every race from
         2022 onward. Predictions made using only data available before each race.
         """
     )
-    _bt = pd.DataFrame({
-        "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
-        "Races (M+W)":     [90, 79, 67, 75],
-        "Spearman Rho":    ["0.604", "0.682", "0.716", "0.720"],
-        "Winner %":        ["35.7%", "43.4%", "31.6%", "27.8%"],
-        "Top-3 %":         ["49.3%", "50.9%", "42.0%", "40.8%"],
-        "Avg. Rank Error": ["5.0", "4.8", "6.8", "7.6"],
-    })
-    st.dataframe(_bt, use_container_width=True, hide_index=True)
+
+    tab_wc, tab_fis = st.tabs(["World Cup", "FIS"])
+
+    with tab_wc:
+        st.markdown("**310 World Cup races (2022+), combined Men and Women:**")
+        _bt_wc = pd.DataFrame({
+            "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+            "Races (M+W)":     [90, 79, 67, 75],
+            "Spearman Rho":    ["0.604", "0.682", "0.716", "0.720"],
+            "Winner %":        ["35.7%", "43.4%", "31.6%", "27.8%"],
+            "Top-3 %":         ["49.3%", "50.9%", "42.0%", "40.8%"],
+            "Avg. Rank Error": ["5.0", "4.8", "6.8", "7.6"],
+        })
+        st.dataframe(_bt_wc, use_container_width=True, hide_index=True)
+
+    with tab_fis:
+        st.markdown(
+            "**5,600+ FIS races (2022+), trained on FIS history — combined Men and Women:**"
+        )
+        _bt_fis = pd.DataFrame({
+            "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+            "Races (M+W)":     [3090, 2307, 494, 210],
+            "Spearman Rho":    ["0.883", "0.880", "0.777", "0.718"],
+            "Winner %":        ["41.3%", "38.6%", "28.7%", "26.8%"],
+            "Top-3 %":         ["61.5%", "55.6%", "45.2%", "46.8%"],
+            "Avg. Rank Error": ["3.4", "4.9", "7.1", "8.6"],
+        })
+        st.dataframe(_bt_fis, use_container_width=True, hide_index=True)
+        st.caption(
+            "Higher Rho on FIS vs World Cup reflects clearer field hierarchies at the FIS level — "
+            "the spread between athletes is wider, making relative ranking more predictable. "
+            "The model trains and predicts on the same race level when a FIS race type is selected."
+        )
+
     st.markdown(
         """
         **How to read these numbers:**
 
-        - **Spearman Rho** — rank correlation between the full predicted and actual finishing order
-          among finishers (1.0 = perfect, 0 = no relationship). Values of 0.60–0.72 indicate a
-          strong, statistically significant relationship.
+        - **Spearman Rho** — rank correlation between predicted and actual finishing order among
+          finishers (1.0 = perfect, 0 = no relationship).
         - **Winner %** — fraction of races where the model's top-ranked athlete actually won.
           A random pick from a 60-athlete field would win roughly 1.7% of the time.
         - **Top-3 %** — fraction of actual podium athletes captured in the model's predicted top 3.
-        - **Avg. Rank Error** — how many positions off the model is on average across all finishers.
-          In a 60-athlete field, an average error of 5–8 positions is a meaningful improvement over
-          predicting by bib order alone (which averages 9–10 positions of error).
+        - **Avg. Rank Error** — mean positional error across all finishers. Predicting by bib
+          order alone averages 9–10 positions of error.
         """
     )
 
@@ -109,14 +132,14 @@ with st.expander("Model Accuracy — Backtesting Results"):
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=604800, show_spinner=False)
-def cached_train(discipline: str, sex: str):
-    """Train v11 XGBRanker on full WC history. Returns (model, hist_df)."""
-    return v11.train(discipline, sex)
+def cached_train(discipline: str, sex: str, race_type: str):
+    """Train v11 XGBRanker on history for the given race type. Returns (model, hist_df)."""
+    return v11.train(discipline, sex, race_type)
 
 
 @st.cache_data(ttl=604800, show_spinner=False)
-def cached_list_venues(discipline: str, sex: str) -> list[str]:
-    return v11.list_venues(discipline, sex)
+def cached_list_venues(discipline: str, sex: str, race_type: str) -> list[str]:
+    return v11.list_venues(discipline, sex, race_type)
 
 
 # ---------------------------------------------------------------------------
@@ -125,11 +148,12 @@ def cached_list_venues(discipline: str, sex: str) -> list[str]:
 
 st.sidebar.header("Race Setup")
 
-sel_disc  = st.sidebar.selectbox("Discipline", ["Slalom", "Giant Slalom", "Super G", "Downhill"])
-sex_label = st.sidebar.radio("Sex", ["Men (M)", "Women (F)"])
-sex_code  = "Men's" if sex_label.startswith("Men") else "Women's"
+sel_disc      = st.sidebar.selectbox("Discipline", ["Slalom", "Giant Slalom", "Super G", "Downhill"])
+sel_race_type = st.sidebar.selectbox("Race Type", ["World Cup", "European Cup", "FIS"])
+sex_label     = st.sidebar.radio("Sex", ["Men (M)", "Women (F)"])
+sex_code      = "Men's" if sex_label.startswith("Men") else "Women's"
 
-venues = cached_list_venues(sel_disc, sex_code)
+venues = cached_list_venues(sel_disc, sex_code, sel_race_type)
 if venues:
     sel_venue = st.sidebar.selectbox("Venue", venues)
 else:
@@ -159,7 +183,7 @@ if precip_on:
 
 st.sidebar.markdown("---")
 st.sidebar.caption(
-    "Model v11 — trained on all available World Cup history.  \n"
+    f"Model v11 — trained on {sel_race_type} history.  \n"
     "XGBRanker with discipline-specific hyperparameters, EWM form, "
     "venue history, DNF risk, form trajectory, and weather signals."
 )
@@ -234,7 +258,7 @@ if start_list is not None:
 
     if run:
         with st.spinner("Loading race history and training model..."):
-            model, hist_df = cached_train(sel_disc, sex_code)
+            model, hist_df = cached_train(sel_disc, sex_code, sel_race_type)
 
         with st.spinner("Building athlete features and predicting..."):
             pred_df = v11.predict(

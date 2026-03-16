@@ -120,15 +120,22 @@ with st.expander("Model Accuracy — Backtesting Results"):
         """
         **How to read these numbers:**
 
-        - **Spearman Rho** — rank correlation between the full predicted and actual finishing order
-          among finishers (1.0 = perfect, 0 = no relationship). Values of 0.61–0.69 indicate a
-          strong, statistically significant relationship.
+        - **Spearman Rho** — rank correlation between predicted and actual finishing order among
+          finishers (1.0 = perfect, 0 = no relationship). Values of 0.61–0.69 indicate a strong,
+          statistically significant relationship.
         - **Winner %** — fraction of races where the model's top-ranked athlete actually won.
           A random pick from a 60-athlete field would win roughly 1.7% of the time.
         - **Top-3 %** — fraction of actual podium athletes captured in the model's predicted top 3.
-        - **Avg. Rank Error** — how many positions off the model is on average across all finishers.
-          In a 60-athlete field, an average error of 7–8 positions is a meaningful improvement over
-          predicting by bib order alone (which averages 9–10 positions of error).
+        - **Avg. Rank Error** — mean positional error across all finishers. Predicting by bib
+          order alone averages 9–10 positions of error.
+
+        **FIS and European Cup races**
+
+        The simulator supports all race types via the Race Type selector in the sidebar.
+        A cross-level validation study using the companion XGBoost model found that the
+        underlying performance signals transfer cleanly to FIS races — Spearman Rho of
+        0.88 for Slalom and 0.88 for Giant Slalom across 5,600+ FIS races (2022+), with
+        lower rank error than at World Cup level due to wider field spread.
         """
     )
 
@@ -171,7 +178,7 @@ def lookup_athletes_by_name(names: tuple) -> pd.DataFrame:
 st.sidebar.header("Race Setup")
 
 DISCIPLINES = ["Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine Combined"]
-RACE_TYPES  = ["World Cup", "Europa Cup", "FIS", "National Championship"]
+RACE_TYPES  = ["World Cup", "European Cup", "FIS", "National Championship"]
 
 sel_disc      = st.sidebar.selectbox("Discipline", DISCIPLINES)
 sel_race_type = st.sidebar.selectbox("Race Type", RACE_TYPES)
