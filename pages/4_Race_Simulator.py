@@ -178,7 +178,23 @@ def lookup_athletes_by_name(names: tuple) -> pd.DataFrame:
 st.sidebar.header("Race Setup")
 
 DISCIPLINES = ["Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine Combined"]
-RACE_TYPES  = ["World Cup", "European Cup", "FIS", "National Championship"]
+RACE_TYPES  = [
+    "World Cup",
+    "European Cup",
+    "FIS",
+    "Nor-Am Cup",
+    "CIT",
+    "National Championships",
+    "National Junior Race",
+    "National Junior Championships",
+    "Entry League FIS",
+    "Far East Cup",
+    "South American Cup",
+    "Australian New Zealand Cup",
+    "University",
+    "FIS Junior World Ski Championships",
+    "FIS Qualification",
+]
 
 sel_disc      = st.sidebar.selectbox("Discipline", DISCIPLINES)
 sel_race_type = st.sidebar.selectbox("Race Type", RACE_TYPES)

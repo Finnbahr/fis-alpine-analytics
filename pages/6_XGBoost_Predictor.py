@@ -149,7 +149,23 @@ def cached_list_venues(discipline: str, sex: str, race_type: str) -> list[str]:
 st.sidebar.header("Race Setup")
 
 sel_disc      = st.sidebar.selectbox("Discipline", ["Slalom", "Giant Slalom", "Super G", "Downhill"])
-sel_race_type = st.sidebar.selectbox("Race Type", ["World Cup", "European Cup", "FIS"])
+sel_race_type = st.sidebar.selectbox("Race Type", [
+    "World Cup",
+    "European Cup",
+    "FIS",
+    "Nor-Am Cup",
+    "CIT",
+    "National Championships",
+    "National Junior Race",
+    "National Junior Championships",
+    "Entry League FIS",
+    "Far East Cup",
+    "South American Cup",
+    "Australian New Zealand Cup",
+    "University",
+    "FIS Junior World Ski Championships",
+    "FIS Qualification",
+])
 sex_label     = st.sidebar.radio("Sex", ["Men (M)", "Women (F)"])
 sex_code      = "Men's" if sex_label.startswith("Men") else "Women's"
 
