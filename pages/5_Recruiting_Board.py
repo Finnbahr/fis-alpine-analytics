@@ -1,10 +1,13 @@
 """
 Alpine Analytics — Recruiting Board
 
-Multi-factor Scout Rating for athletes 21 and under.
-Uses career (rolling) stats — field-normalised performance, trend-adjusted
-consistency, reliability, and trajectory. Designed for college programmes
-and independent teams.
+FIS Development Index — rolling 18-month window.
+Scoring inspired by golf handicap (best-N-of-last-M), tennis ATP (rolling window),
+and FM potential ratings (separate current level from trajectory).
+
+FIS points are field-adjusted by definition (F-value formula) so they are
+directly comparable across race types — unlike z-score which punishes athletes
+who seek out tougher competition.
 """
 
 import sys, os
@@ -18,52 +21,70 @@ import plotly.graph_objects as go
 from database import query
 
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
+# ─── Constants ────────────────────────────────────────────────────────────────
 
-CURRENT_YEAR = 2026
-MAX_AGE      = 21                       # hard cap — board is for U21 only
-MIN_YOB      = CURRENT_YEAR - MAX_AGE  # 2005 — oldest eligible birth year
+CURRENT_YEAR   = 2026
+MAX_AGE        = 21
+MIN_YOB        = CURRENT_YEAR - MAX_AGE      # 2005
+ROLLING_MONTHS = 18
+N_PEAK         = 5    # golf-handicap: avg of best N results in window
+N_STD          = 10   # consistency: std of best N results
+
+# Race difficulty weights (0–100) — used to credit athletes racing tougher fields
+RACE_LEVEL_WEIGHT = {
+    "World Cup":                          100,
+    "Audi FIS Ski World Cup":             100,
+    "World Cup Speed Event":              100,
+    "Olympic Winter Games":               100,
+    "World Championships":                100,
+    "FIS Junior World Ski Championships":  90,
+    "European Cup":                        80,
+    "European Cup Speed Event":            80,
+    "CIT":                                 75,
+    "CIT Arnold Lunn World Cup":           75,
+    "Nor-Am Cup":                          65,
+    "South American Cup":                  65,
+    "Australian New Zealand Cup":          65,
+    "Far East Cup":                        65,
+    "Asian Winter Games":                  65,
+    "FIS":                                 50,
+    "FIS Qualification":                   50,
+    "Entry League FIS":                    45,
+    "National Championships":              40,
+    "University":                          35,
+    "National Junior Championships":       35,
+    "National Junior Race":                30,
+}
+_DEFAULT_WEIGHT = 40
 
 RACE_LEVEL_GROUPS = {
     "All levels": None,
-    "World Cup": [
-        "World Cup", "World Cup Speed Event", "Audi FIS Ski World Cup",
-        "Olympic Winter Games", "World Championships",
-    ],
-    "European Cup": [
-        "European Cup", "European Cup Speed Event",
-        "CIT", "CIT Arnold Lunn World Cup",
-    ],
-    "Continental Cup": [
-        "Nor-Am Cup", "South American Cup",
-        "Australian New Zealand Cup", "Far East Cup", "Asian Winter Games",
-    ],
-    "FIS / Junior": [
-        "FIS", "FIS Junior World Ski Championships", "FIS Qualification",
-        "National Junior Championships", "National Junior Race",
-        "National Championships", "Entry League FIS",
-    ],
+    "World Cup":       ["World Cup", "World Cup Speed Event", "Audi FIS Ski World Cup",
+                        "Olympic Winter Games", "World Championships"],
+    "European Cup":    ["European Cup", "European Cup Speed Event",
+                        "CIT", "CIT Arnold Lunn World Cup"],
+    "Continental Cup": ["Nor-Am Cup", "South American Cup",
+                        "Australian New Zealand Cup", "Far East Cup", "Asian Winter Games"],
+    "FIS / Junior":    ["FIS", "FIS Junior World Ski Championships", "FIS Qualification",
+                        "National Junior Championships", "National Junior Race",
+                        "National Championships", "Entry League FIS"],
 }
 
 DISCIPLINES = ["All", "Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine Combined"]
 
-# Score component weights — must sum to 1.0
-W_FORM        = 0.40
-W_CONSISTENCY = 0.25
-W_RELIABILITY = 0.20
-W_TRAJECTORY  = 0.15
+# Scout Rating component weights — must sum to 1.0
+W_PEAK        = 0.35
+W_TRAJECTORY  = 0.30
+W_COMP_LEVEL  = 0.20
+W_CONSISTENCY = 0.15
 
 
-# ---------------------------------------------------------------------------
-# Data loader — career (rolling) stats
-# ---------------------------------------------------------------------------
+# ─── Data loader ──────────────────────────────────────────────────────────────
 
 @st.cache_data(ttl=604800)
-def load_recruiting_data() -> pd.DataFrame:
-    """Career stats for all athletes born 2005 or later (≤21 in 2026)."""
-    return query("""
+def load_rolling_races() -> pd.DataFrame:
+    """Per-race rows for all athletes born >= MIN_YOB in the rolling window."""
+    return query(f"""
         WITH
         yob_country AS (
             SELECT DISTINCT ON (fis_code)
@@ -81,7 +102,7 @@ def load_recruiting_data() -> pd.DataFrame:
         ),
         gender_map AS (
             SELECT DISTINCT ON (fis_code)
-                fis_code, sex
+                fis_code::text AS fis_code, sex
             FROM (
                 SELECT fr.fis_code::text AS fis_code, rd.sex, COUNT(*) AS cnt
                 FROM raw.fis_results fr
@@ -91,85 +112,118 @@ def load_recruiting_data() -> pd.DataFrame:
             ) g
             ORDER BY fis_code, cnt DESC
         ),
-        latest_streak AS (
-            SELECT DISTINCT ON (fis_code, discipline)
-                fis_code,
-                discipline,
-                ewma_race_z,
-                momentum_z
-            FROM athlete_aggregate.hot_streak
-            WHERE race_z_score IS NOT NULL
-            ORDER BY fis_code, discipline, date DESC
-        ),
-        weather_versatility AS (
+        career AS (
             SELECT
-                fis_code,
-                discipline,
-                STDDEV(avg_z_score) AS weather_std,
-                COUNT(*)            AS weather_bin_count
-            FROM athlete_aggregate.weather_performance
-            GROUP BY fis_code, discipline
-            HAVING COUNT(*) >= 3
-        ),
-        disc_versatility AS (
-            SELECT fis_code::text AS fis_code, COUNT(DISTINCT discipline) AS n_disciplines
-            FROM athlete_aggregate.performance_consistency_career
-            WHERE races >= 3
-            GROUP BY fis_code
-        ),
-        best_fis_cte AS (
-            SELECT
-                fr.fis_code::text AS fis_code,
+                fr.fis_code::text                                       AS fis_code,
                 rd.discipline,
-                MIN(fr.fis_points) AS best_fis
+                COUNT(*)                                                AS career_races,
+                MIN(CASE WHEN fr.fis_points > 0 THEN fr.fis_points END) AS career_best_fis
             FROM raw.fis_results fr
             JOIN raw.race_details rd ON rd.race_id = fr.race_id
-            WHERE fr.fis_points IS NOT NULL AND fr.fis_points > 0
             GROUP BY fr.fis_code, rd.discipline
         )
         SELECT
-            pc.fis_code,
-            pc.name,
-            pc.discipline,
-            pc.race_type,
-            pc.races                                        AS race_count,
+            fr.fis_code::text            AS fis_code,
+            fr.name,
             yc.yob,
             yc.country,
             gm.sex,
-            -- Performance
-            ROUND(pc.mean_race_z_score::numeric, 3)        AS mean_z,
-            ROUND(pc.std_race_z_score::numeric, 3)         AS std_z,
-            ROUND(pc.mean_fis::numeric, 1)                 AS mean_fis,
-            ROUND(bf.best_fis::numeric, 1)                 AS best_fis,
-            -- Reliability
-            ROUND((pc.dnf_rate * 100)::numeric, 1)         AS dnf_pct,
-            pc.max_dnf_streak                              AS max_dnf_streak,
-            -- Trajectory
-            ROUND(ls.ewma_race_z::numeric, 3)              AS current_form_z,
-            ROUND(ls.momentum_z::numeric, 3)               AS momentum_z,
-            -- Weather
-            ROUND(wv.weather_std::numeric, 3)              AS weather_std,
-            wv.weather_bin_count,
-            -- Versatility
-            dv.n_disciplines
-        FROM athlete_aggregate.performance_consistency_career pc
-        LEFT JOIN yob_country       yc ON yc.fis_code = pc.fis_code
-        LEFT JOIN gender_map        gm ON gm.fis_code = pc.fis_code
-        LEFT JOIN latest_streak     ls ON ls.fis_code  = pc.fis_code
-                                       AND ls.discipline = pc.discipline
-        LEFT JOIN weather_versatility wv ON wv.fis_code  = pc.fis_code
-                                          AND wv.discipline = pc.discipline
-        LEFT JOIN disc_versatility  dv ON dv.fis_code = pc.fis_code
-        LEFT JOIN best_fis_cte      bf ON bf.fis_code  = pc.fis_code
-                                       AND bf.discipline = pc.discipline
-        WHERE pc.races >= 3
-          AND pc.mean_race_z_score IS NOT NULL
+            rd.discipline,
+            rd.race_type,
+            rd.date,
+            fr.fis_points,
+            ca.career_races,
+            ca.career_best_fis
+        FROM raw.fis_results fr
+        JOIN raw.race_details rd   ON rd.race_id  = fr.race_id
+        JOIN yob_country       yc  ON yc.fis_code = fr.fis_code::text
+        JOIN gender_map        gm  ON gm.fis_code = fr.fis_code::text
+        LEFT JOIN career       ca  ON ca.fis_code  = fr.fis_code::text
+                                   AND ca.discipline = rd.discipline
+        WHERE yc.yob >= {MIN_YOB}
+          AND rd.date >= CURRENT_DATE - INTERVAL '{ROLLING_MONTHS} months'
+          AND rd.discipline IS NOT NULL AND rd.discipline <> ''
     """)
 
 
-# ---------------------------------------------------------------------------
-# Scoring
-# ---------------------------------------------------------------------------
+# ─── Rolling metric computation ───────────────────────────────────────────────
+
+def _group_metrics(g: pd.DataFrame) -> dict | None:
+    """Compute rolling window metrics for one athlete+discipline group."""
+    g = g.sort_values("date")
+    n_total   = len(g)
+    finished  = g[g["fis_points"].notna() & (g["fis_points"] > 0)]
+    n_fin     = len(finished)
+    if n_fin == 0:
+        return None
+
+    dnf_pct   = round((n_total - n_fin) / n_total * 100, 1)
+    pts       = finished["fis_points"].values
+
+    # Peak FIS — avg of best N_PEAK results (golf handicap style)
+    peak_fis  = float(np.sort(pts)[:min(N_PEAK, n_fin)].mean())
+
+    # Consistency — std of best N_STD results (ceiling reliability)
+    n_std     = min(N_STD, n_fin)
+    rolling_std = float(np.sort(pts)[:n_std].std()) if n_std >= 2 else 0.0
+
+    # Trajectory — linear slope of FIS points over time, normalised to % of mean/month
+    # Negative slope = FIS points are dropping = athlete is getting faster
+    if n_fin >= 3:
+        days = (finished["date"] - finished["date"].min()).dt.days.values.astype(float)
+        if days.max() > 7:
+            slope, _ = np.polyfit(days, pts, 1)
+            mean_pts  = pts.mean()
+            fis_trend = (slope * 30 / mean_pts * 100) if mean_pts > 0 else 0.0
+        else:
+            fis_trend = 0.0
+    else:
+        fis_trend = 0.0
+
+    comp_level = float(g["race_level_weight"].mean())
+
+    return {
+        "rolling_races":    n_total,
+        "n_finished":       n_fin,
+        "dnf_pct":          dnf_pct,
+        "peak_fis":         round(peak_fis, 1),
+        "rolling_std":      round(rolling_std, 1),
+        "fis_trend":        round(fis_trend, 3),      # negative = improving
+        "improvement_rate": round(-fis_trend, 3),      # positive = improving (display)
+        "comp_level":       round(comp_level, 1),
+        "rolling_mean_fis": round(float(pts.mean()), 1),
+        "career_races":     int(g["career_races"].iloc[0]) if g["career_races"].notna().any() else n_total,
+        "career_best_fis":  round(float(g["career_best_fis"].dropna().min()), 1)
+                            if g["career_best_fis"].notna().any() else round(peak_fis, 1),
+    }
+
+
+def build_athlete_table(raw: pd.DataFrame) -> pd.DataFrame:
+    """Collapse per-race rows into one summary row per athlete+discipline."""
+    raw = raw.copy()
+    raw["date"]              = pd.to_datetime(raw["date"])
+    raw["race_level_weight"] = raw["race_type"].map(RACE_LEVEL_WEIGHT).fillna(_DEFAULT_WEIGHT)
+
+    records = []
+    for (fis_code, discipline), g in raw.groupby(["fis_code", "discipline"], sort=False):
+        metrics = _group_metrics(g)
+        if metrics is None:
+            continue
+        row = g.iloc[0]
+        records.append({
+            "fis_code":   fis_code,
+            "name":       row["name"],
+            "yob":        int(row["yob"]) if pd.notna(row["yob"]) else None,
+            "country":    row["country"],
+            "sex":        row["sex"],
+            "discipline": discipline,
+            **metrics,
+        })
+
+    return pd.DataFrame(records) if records else pd.DataFrame()
+
+
+# ─── Scoring ──────────────────────────────────────────────────────────────────
 
 def _pct_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
     """Percentile rank 0–100. ascending=True → higher raw value = higher score."""
@@ -182,103 +236,77 @@ def _pct_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
 
 def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-
-    # 1. Form — career mean z-score vs field. Higher = better.
-    df["score_form"] = _pct_rank(df["mean_z"], ascending=True)
-
-    # 2. Consistency — std of z-scores, adjusted for trend.
-    #    Problem: an athlete on a strong upward trajectory will have a high std
-    #    simply because their early races were worse than their recent ones.
-    #    Fix: give improving athletes a trend credit that reduces their effective
-    #    std proportionally to momentum_z, up to 40% of observed std.
-    momentum   = df["momentum_z"].fillna(0.0)
-    std_median = df["std_z"].median() if df["std_z"].notna().any() else 1.0
-    trend_credit = np.clip(momentum * std_median * 0.5, 0, df["std_z"].fillna(0) * 0.40)
-    adj_std = (df["std_z"].fillna(std_median) - trend_credit).clip(lower=0)
-    df["score_consistency"] = _pct_rank(adj_std, ascending=False)
-
-    # 3. Reliability — DNF/DSQ/DNS rate. Lower = better.
-    df["score_reliability"] = _pct_rank(df["dnf_pct"], ascending=False)
-
-    # 4. Trajectory — momentum_z: positive = currently outperforming career baseline.
-    df["score_trajectory"] = _pct_rank(df["momentum_z"].fillna(0.0), ascending=True)
-
-    # Composite
+    # Lower FIS points = better athlete → ascending=False gives high score to low points
+    df["score_peak"]        = _pct_rank(df["peak_fis"],    ascending=False)
+    # More negative fis_trend = faster improvement → ascending=False gives high score to negative values
+    df["score_trajectory"]  = _pct_rank(df["fis_trend"],   ascending=False)
+    # Higher comp_level weight = tougher fields → ascending=True
+    df["score_comp_level"]  = _pct_rank(df["comp_level"],  ascending=True)
+    # Lower rolling_std = more reliable ceiling → ascending=False
+    df["score_consistency"] = _pct_rank(df["rolling_std"], ascending=False)
     df["scout_rating"] = (
-        W_FORM        * df["score_form"]
-        + W_CONSISTENCY * df["score_consistency"]
-        + W_RELIABILITY * df["score_reliability"]
+        W_PEAK        * df["score_peak"]
         + W_TRAJECTORY  * df["score_trajectory"]
+        + W_COMP_LEVEL  * df["score_comp_level"]
+        + W_CONSISTENCY * df["score_consistency"]
     ).round(1)
-
     return df
 
 
-# ---------------------------------------------------------------------------
-# Page config
-# ---------------------------------------------------------------------------
+# ─── Page config ──────────────────────────────────────────────────────────────
 
 st.set_page_config(page_title="Recruiting Board — Alpine Analytics", layout="wide")
-
 st.title("Recruiting Board")
 st.markdown(
-    "Field-normalised performance, trend-adjusted consistency, reliability, and "
-    "trajectory — four dimensions that together reveal development potential. "
-    "All career results are used (rolling). Scores are percentile-ranked within "
-    "whoever is currently in the filtered pool."
+    "**FIS Development Index** — rolling 18-month window. "
+    "Scores peak level, trajectory, competition level, and consistency. "
+    "FIS points are race-adjusted by definition — comparable across race types "
+    "so athletes are not penalized for seeking tougher competition."
 )
 
 with st.expander("How Scout Rating is calculated", expanded=False):
     st.markdown(f"""
-**Scout Rating** is a 0–100 composite, percentile-ranked within the current pool:
+**Scout Rating** is a 0–100 composite, percentile-ranked within whoever is in the current filter pool.
 
-| Component | Weight | What it measures |
+| Component | Weight | Method |
 |---|---|---|
-| **Form** | {W_FORM:.0%} | Career mean z-score vs field. Above 0 = above-average finisher relative to whoever else is in that race. |
-| **Consistency** | {W_CONSISTENCY:.0%} | How reliably the athlete hits their own level. Measured as std of z-scores, **adjusted for upward trend** — an athlete who is genuinely improving is not penalised for the variance introduced by getting better. |
-| **Reliability** | {W_RELIABILITY:.0%} | Career DNF/DSQ/DNS rate. Finishing races is non-negotiable for development athletes. |
-| **Trajectory** | {W_TRAJECTORY:.0%} | Momentum z — how their recent results compare to their own career baseline. Positive = currently outperforming history. |
+| **Peak Level** | {W_PEAK:.0%} | Average of your **best {N_PEAK} FIS results** in the last {ROLLING_MONTHS} months. Golf-handicap style — one bad day at a World Cup does not tank your score. Lower FIS = better. |
+| **Trajectory** | {W_TRAJECTORY:.0%} | Linear slope of your FIS points over the {ROLLING_MONTHS}-month window. Dropping 3 pts/month at 60 pts avg is a stronger signal than the same drop at 120 pts — slope is normalised as **% of mean per month** so it's fair across ability levels. |
+| **Competition Level** | {W_COMP_LEVEL:.0%} | Weighted avg of every race entered (WC=100, EC=80, Nor-Am/CIT=65, FIS=50, NJR=30). Athletes who race European Cup fields at 16 get explicit credit for it. |
+| **Consistency** | {W_CONSISTENCY:.0%} | Std of their best {N_STD} FIS results. Measures how reliably they hit their ceiling — a tight spread means they perform under pressure. Independent of trajectory. |
 
 **Column guide:**
 
 | Column | Meaning |
 |---|---|
-| **Form (z)** | Career mean z-score. 0 = field average; +0.3 comfortably above; +0.7 elite. |
-| **Avg FIS** | Career average FIS points. Familiar reference — lower is faster. |
-| **Best FIS** | Career-best (lowest ever) FIS points — their ceiling to date. |
-| **Consistency** | 0–100 percentile. 90+ = very reliable; 50 = average variation; <30 = erratic. Adjusted for improving athletes. |
-| **Reliability** | 0–100 percentile based on DNF rate. 90+ = almost always finishes; <40 = frequent DNFs. |
-| **Trajectory** | 0–100 percentile based on recent vs career momentum. 75+ = clearly on the rise. |
-| **All-Conditions** | How consistently the athlete performs across different weather bins (temperature, cloud, precipitation). Excellent = low spread across conditions; Limited = insufficient weather data. |
-| **Events** | Number of FIS disciplines with 3+ career starts. Higher = more versatile. |
-| **Scout Rating** | Weighted composite of all four components. 100 = best in current pool. |
+| **Peak FIS** | Avg of best {N_PEAK} FIS points in the rolling window. Primary level indicator. Lower = faster. |
+| **Best Ever** | All-time career-best single FIS result — their absolute ceiling. |
+| **Avg FIS (rolling)** | Mean of all finishes in window. Higher than Peak FIS — includes hard-field days. Reference only. |
+| **Trend (%/mo)** | FIS points improvement rate per month, normalised to % of their mean. **Positive = getting faster.** e.g. +2.5 means dropping ~2.5% of their avg FIS points every month. |
+| **Comp. Level** | Avg race level weight 0–100. 80+ = primarily EC/WC circuit. 50 = FIS. 35 = junior national. |
+| **Consistency** | 0–100. 90+ = very reliable results near their ceiling. <40 = wide spread. |
+| **DNF %** | % not finished. Reference only — not in Scout Rating composite. |
+| **Scout Rating** | Composite: {W_PEAK:.0%} Peak + {W_TRAJECTORY:.0%} Trajectory + {W_COMP_LEVEL:.0%} Comp. Level + {W_CONSISTENCY:.0%} Consistency. 100 = best in current pool. |
 
-**Consistency vs Trajectory — read them together:**
-A high Trajectory + moderate Consistency means the athlete is improving but their early results
-drag up the variance. This is a positive profile — check recency of form. A high Consistency +
-flat Trajectory means a stable but plateaued athlete. A high Consistency + declining Trajectory
-is a red flag.
+**Reading Trajectory vs Peak Level together:**
+High Trajectory + high Peak Level = best profile — already fast, still improving.
+High Trajectory + moderate Peak Level = breakout candidate — not there yet but moving fast.
+High Peak Level + flat Trajectory = established but potentially plateaued — check their age.
+Low Trajectory at young age = early sign, but may just need races — weight Career Races accordingly.
     """)
 
 
-# ---------------------------------------------------------------------------
-# Load data
-# ---------------------------------------------------------------------------
+# ─── Load raw race data ───────────────────────────────────────────────────────
 
 with st.spinner("Loading athlete data..."):
-    df_all = load_recruiting_data()
+    raw_df = load_rolling_races()
 
-if df_all.empty:
+if raw_df.empty:
     st.error("No data available.")
     st.stop()
 
-# Pre-filter: only athletes ≤ 21 in current year (born 2005 or later)
-df_all = df_all[df_all["yob"].notna() & (df_all["yob"] >= MIN_YOB)].copy()
 
-
-# ---------------------------------------------------------------------------
-# Sidebar filters
-# ---------------------------------------------------------------------------
+# ─── Sidebar filters ──────────────────────────────────────────────────────────
 
 st.sidebar.header("Filters")
 
@@ -286,38 +314,53 @@ gender_choice = st.sidebar.radio("Gender", ["Men's", "Women's"], horizontal=True
 disc_choice   = st.sidebar.selectbox("Discipline", DISCIPLINES)
 level_choice  = st.sidebar.selectbox("Race Level", list(RACE_LEVEL_GROUPS.keys()))
 
-# Birth year range — constrained to ≤ 21
-available_yobs = sorted(df_all["yob"].dropna().astype(int).unique())
-yob_min_sel, yob_max_sel = st.sidebar.select_slider(
-    "Birth Year",
-    options=available_yobs,
-    value=(min(available_yobs), max(available_yobs)),
-    help=f"Only athletes born {MIN_YOB} or later (age ≤ 21 in {CURRENT_YEAR}) are shown.",
-)
-
-min_races = st.sidebar.slider("Minimum career races", min_value=3, max_value=30, value=5)
-
-country_search = st.sidebar.text_input(
-    "Filter by country (e.g. USA, AUT)",
-).strip().upper()
-
-
-# ---------------------------------------------------------------------------
-# Apply filters
-# ---------------------------------------------------------------------------
-
-df = df_all[df_all["sex"] == gender_choice].copy()
-
-if disc_choice != "All":
-    df = df[df["discipline"] == disc_choice]
-
-race_types = RACE_LEVEL_GROUPS[level_choice]
+# Race type and gender filters are applied to raw race rows before building
+# the athlete table — this controls which races feed into the metrics
+race_types   = RACE_LEVEL_GROUPS[level_choice]
+filtered_raw = raw_df[raw_df["sex"] == gender_choice].copy()
 if race_types is not None:
-    df = df[df["race_type"].isin(race_types)]
+    filtered_raw = filtered_raw[filtered_raw["race_type"].isin(race_types)]
+if disc_choice != "All":
+    filtered_raw = filtered_raw[filtered_raw["discipline"] == disc_choice]
 
-df = df[df["yob"].between(yob_min_sel, yob_max_sel)]
-df = df[df["race_count"] >= min_races]
+if filtered_raw.empty:
+    st.info("No athletes match the current filters.")
+    st.stop()
 
+# Build per-athlete summary from filtered races
+df_all = build_athlete_table(filtered_raw)
+
+if df_all.empty:
+    st.info("No athletes with sufficient data match the current filters.")
+    st.stop()
+
+# Hard cap: only athletes ≤ MAX_AGE in CURRENT_YEAR
+df_all = df_all[df_all["yob"].notna() & (df_all["yob"] >= MIN_YOB)].copy()
+
+if df_all.empty:
+    st.info("No athletes in the eligible age range.")
+    st.stop()
+
+# Birth year slider
+available_yobs = sorted(df_all["yob"].dropna().astype(int).unique())
+if len(available_yobs) >= 2:
+    yob_min_sel, yob_max_sel = st.sidebar.select_slider(
+        "Birth Year",
+        options=available_yobs,
+        value=(min(available_yobs), max(available_yobs)),
+        help=f"Only athletes born {MIN_YOB}+ (age ≤ {MAX_AGE} in {CURRENT_YEAR}) are shown.",
+    )
+else:
+    yob_min_sel = yob_max_sel = available_yobs[0]
+
+min_races      = st.sidebar.slider("Min races (rolling window)", min_value=1, max_value=20, value=3)
+country_search = st.sidebar.text_input("Filter by country (e.g. USA, AUT)").strip().upper()
+
+
+# ─── Apply remaining filters ──────────────────────────────────────────────────
+
+df = df_all[df_all["yob"].between(yob_min_sel, yob_max_sel)].copy()
+df = df[df["rolling_races"] >= min_races]
 if country_search:
     df = df[df["country"].str.upper().str.contains(country_search, na=False)]
 
@@ -325,57 +368,34 @@ if df.empty:
     st.info("No athletes match the current filters. Try relaxing the requirements.")
     st.stop()
 
-# "All" disciplines: keep the athlete's most-raced discipline row
+# For "All" disciplines: keep each athlete's best-FIS-points discipline row
 if disc_choice == "All":
-    df = df.sort_values("race_count", ascending=False).drop_duplicates("fis_code").copy()
+    df = df.sort_values("peak_fis").drop_duplicates("fis_code").copy()
 
 
-# ---------------------------------------------------------------------------
-# Score and rank
-# ---------------------------------------------------------------------------
+# ─── Score and sort ───────────────────────────────────────────────────────────
 
 df = compute_scout_rating(df)
 df = df.sort_values("scout_rating", ascending=False).reset_index(drop=True)
 df.index += 1
 df.index.name = "Rank"
+df["age"] = CURRENT_YEAR - df["yob"].astype(int)
 
 
-# ---------------------------------------------------------------------------
-# Summary metrics
-# ---------------------------------------------------------------------------
+# ─── Summary metrics ──────────────────────────────────────────────────────────
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Athletes ranked", len(df))
-c2.metric("Median form (z)", f"{df['mean_z'].median():+.2f}")
-c3.metric("Median avg FIS", f"{df['mean_fis'].median():.0f}")
-c4.metric("Median DNF rate", f"{df['dnf_pct'].median():.1f}%")
+c2.metric("Median Peak FIS", f"{df['peak_fis'].median():.1f}")
+c3.metric("Improving", f"{(df['fis_trend'] < 0).sum()} / {len(df)}")
+c4.metric("Median comp. level", f"{df['comp_level'].median():.0f} / 100")
 
 st.divider()
 
 
-# ---------------------------------------------------------------------------
-# Leaderboard table
-# ---------------------------------------------------------------------------
+# ─── Leaderboard table ────────────────────────────────────────────────────────
 
 st.subheader("Leaderboard")
-
-def _weather_label(row) -> str:
-    if pd.isna(row.get("weather_std")) or pd.isna(row.get("weather_bin_count")):
-        return "Limited"
-    s = row["weather_std"]
-    if s < 0.20:   return "Excellent"
-    elif s < 0.35: return "Good"
-    elif s < 0.55: return "Moderate"
-    else:          return "Variable"
-
-def _trajectory_label(v) -> str:
-    if pd.isna(v) or v == 0:  return "Stable"
-    if v >  0.15: return "Rising"
-    if v < -0.15: return "Declining"
-    return "Stable"
-
-df["all_conditions"] = df.apply(_weather_label, axis=1)
-df["age"]            = CURRENT_YEAR - df["yob"].astype(int)
 
 display_cols = {
     "name":             "Name",
@@ -383,23 +403,26 @@ display_cols = {
     "yob":              "YOB",
     "age":              "Age",
     "discipline":       "Discipline",
-    "race_count":       "Career Races",
-    "mean_z":           "Form (z)",
-    "mean_fis":         "Avg FIS",
-    "best_fis":         "Best FIS",
-    "score_form":       "Form Score",
-    "score_consistency":"Consistency",
-    "score_reliability":"Reliability",
+    "rolling_races":    "Races (18mo)",
+    "career_races":     "Career Races",
+    "peak_fis":         "Peak FIS",
+    "career_best_fis":  "Best Ever",
+    "rolling_mean_fis": "Avg FIS (rolling)",
+    "improvement_rate": "Trend (%/mo)",
+    "comp_level":       "Comp. Level",
+    "dnf_pct":          "DNF %",
+    "score_peak":       "Level Score",
     "score_trajectory": "Trajectory",
-    "all_conditions":   "All-Conditions",
-    "n_disciplines":    "Events",
+    "score_comp_level": "Comp. Score",
+    "score_consistency":"Consistency",
     "scout_rating":     "Scout Rating",
 }
 
 table = df[list(display_cols.keys())].rename(columns=display_cols)
-table["YOB"]   = table["YOB"].astype("Int64")
-table["Age"]   = table["Age"].astype("Int64")
-table["Events"]= table["Events"].astype("Int64")
+table["YOB"]          = table["YOB"].astype("Int64")
+table["Age"]          = table["Age"].astype("Int64")
+table["Career Races"] = table["Career Races"].astype("Int64")
+table["Races (18mo)"] = table["Races (18mo)"].astype("Int64")
 
 st.dataframe(
     table,
@@ -407,108 +430,141 @@ st.dataframe(
     column_config={
         "Scout Rating": st.column_config.ProgressColumn(
             "Scout Rating", format="%.1f", min_value=0, max_value=100,
-            help="Weighted composite: 40% form + 25% consistency + 20% reliability + 15% trajectory. Percentile within current pool.",
+            help=f"Composite: {W_PEAK:.0%} Peak + {W_TRAJECTORY:.0%} Trajectory + "
+                 f"{W_COMP_LEVEL:.0%} Comp. Level + {W_CONSISTENCY:.0%} Consistency. "
+                 "Percentile within current pool.",
         ),
-        "Form Score": st.column_config.ProgressColumn(
-            "Form Score", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of career mean z-score within this pool. 100 = best form.",
-        ),
-        "Consistency": st.column_config.ProgressColumn(
-            "Consistency", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of trend-adjusted std of z-scores. 100 = most reliable. Improving athletes get credit for their upward trend.",
-        ),
-        "Reliability": st.column_config.ProgressColumn(
-            "Reliability", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of inverse DNF/DSQ/DNS rate. 100 = always finishes.",
+        "Level Score": st.column_config.ProgressColumn(
+            "Level Score", format="%.0f", min_value=0, max_value=100,
+            help=f"Percentile rank of Peak FIS (avg best {N_PEAK}). 100 = fastest in pool.",
         ),
         "Trajectory": st.column_config.ProgressColumn(
             "Trajectory", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of momentum z (recent vs career baseline). 100 = strongest upward momentum in pool.",
+            help="Percentile rank of FIS points improvement slope. 100 = fastest rate of improvement.",
         ),
-        "Form (z)":      st.column_config.NumberColumn("Form (z)",      format="%+.3f", help="Career mean z-score. 0=field avg; +0.3=above avg; +0.7=elite tier."),
-        "Avg FIS":       st.column_config.NumberColumn("Avg FIS",       format="%.1f",  help="Career average FIS points. Lower = faster."),
-        "Best FIS":      st.column_config.NumberColumn("Best FIS",      format="%.1f",  help="Career-best (lowest ever) FIS points. Their ceiling to date."),
-        "Career Races":  st.column_config.NumberColumn("Career Races",  help="Total career starts across all seasons."),
-        "All-Conditions":st.column_config.TextColumn("All-Conditions",  help="Performance spread across weather bins. Excellent (<0.20 std) → Variable (>0.55 std). 'Limited' = fewer than 3 weather bins on record."),
-        "Events":        st.column_config.NumberColumn("Events",        help="Number of disciplines with 3+ career starts."),
-        "Age":           st.column_config.NumberColumn("Age",           help=f"Age as of {CURRENT_YEAR}."),
+        "Comp. Score": st.column_config.ProgressColumn(
+            "Comp. Score", format="%.0f", min_value=0, max_value=100,
+            help="Percentile rank of avg competition level weight. 100 = consistently races toughest fields.",
+        ),
+        "Consistency": st.column_config.ProgressColumn(
+            "Consistency", format="%.0f", min_value=0, max_value=100,
+            help=f"Percentile rank of std of best {N_STD} results. 100 = most reliable ceiling.",
+        ),
+        "Peak FIS":          st.column_config.NumberColumn(
+            "Peak FIS", format="%.1f",
+            help=f"Avg of best {N_PEAK} FIS points in the rolling {ROLLING_MONTHS}-month window. Lower = faster.",
+        ),
+        "Best Ever":         st.column_config.NumberColumn(
+            "Best Ever", format="%.1f",
+            help="All-time career-best FIS result. Their absolute ceiling.",
+        ),
+        "Avg FIS (rolling)": st.column_config.NumberColumn(
+            "Avg FIS (rolling)", format="%.1f",
+            help="Mean of all finishes in the rolling window. Includes hard-field results — reference only.",
+        ),
+        "Trend (%/mo)":      st.column_config.NumberColumn(
+            "Trend (%/mo)", format="%+.1f",
+            help="FIS points improvement rate per month, as % of their mean. Positive = getting faster. "
+                 "e.g. +2.5 means dropping ~2.5% of their avg FIS points every month.",
+        ),
+        "Comp. Level":       st.column_config.NumberColumn(
+            "Comp. Level", format="%.0f",
+            help="Avg race level 0–100. WC=100, EC=80, Nor-Am/CIT=65, FIS=50, NJR=30.",
+        ),
+        "DNF %":             st.column_config.NumberColumn(
+            "DNF %", format="%.1f",
+            help="% of races not finished. Reference only — not included in Scout Rating.",
+        ),
+        "Races (18mo)":      st.column_config.NumberColumn(
+            "Races (18mo)", help="Starts in the rolling 18-month window.",
+        ),
+        "Career Races":      st.column_config.NumberColumn(
+            "Career Races", help="All career starts across all seasons and levels.",
+        ),
+        "Age":               st.column_config.NumberColumn(
+            "Age", help=f"Age as of {CURRENT_YEAR}.",
+        ),
     },
     height=min(650, 55 + 35 * len(table)),
 )
 
 
-# ---------------------------------------------------------------------------
-# Charts
-# ---------------------------------------------------------------------------
+# ─── Charts ───────────────────────────────────────────────────────────────────
 
 st.divider()
 
-# ── Row 1: Form vs Consistency scatter + Radar ───────────────────────────────
+# Row 1: Peak FIS vs Trajectory scatter  +  Athlete Radar
 scatter_col, radar_col = st.columns([3, 2])
 
 with scatter_col:
-    st.subheader("Form vs Consistency")
-    st.caption("Top-right = fast and reliable (target zone). Bubble size = career races. Color = Scout Rating.")
-
+    st.subheader("Peak Level vs Trajectory")
+    st.caption(
+        "Top-right = already fast AND improving quickly. "
+        "Y-axis inverted: lower FIS (better) appears higher. "
+        "Bubble size = races in rolling window. Color = Scout Rating."
+    )
     fig_s = px.scatter(
         df,
-        x="mean_z",
-        y="score_consistency",
-        size="race_count",
+        x="improvement_rate",
+        y="peak_fis",
+        size="rolling_races",
         color="scout_rating",
         hover_name="name",
         hover_data={
-            "country": True, "yob": True, "race_count": True,
-            "mean_z": ":.3f", "mean_fis": ":.1f", "best_fis": ":.1f",
-            "dnf_pct": ":.1f", "scout_rating": ":.1f",
+            "country": True, "yob": True, "rolling_races": True,
+            "peak_fis": ":.1f", "career_best_fis": ":.1f",
+            "comp_level": ":.0f", "dnf_pct": ":.1f",
+            "scout_rating": ":.1f",
         },
         color_continuous_scale="RdYlGn",
         range_color=[0, 100],
         size_max=28,
         labels={
-            "mean_z": "Form — Career mean z-score",
-            "score_consistency": "Consistency Score (0–100, trend-adjusted)",
-            "scout_rating": "Scout Rating",
-            "race_count": "Career Races",
+            "improvement_rate": "Improvement Rate (%/mo) — positive = getting faster",
+            "peak_fis":         "Peak FIS (lower = faster)",
+            "scout_rating":     "Scout Rating",
+            "rolling_races":    "Races (18mo)",
         },
         template="plotly_white",
     )
     fig_s.add_vline(x=0, line_dash="dot", line_color="gray", opacity=0.4)
+    fig_s.update_yaxes(autorange="reversed")   # lower FIS = top of chart
     fig_s.update_traces(marker_opacity=0.78)
     fig_s.update_layout(
         height=420,
         coloraxis_colorbar=dict(title="Scout Rating"),
-        margin=dict(l=50, r=20, t=20, b=50),
+        margin=dict(l=50, r=20, t=20, b=60),
     )
     st.plotly_chart(fig_s, use_container_width=True)
 
 
 with radar_col:
     st.subheader("Athlete Spotlight")
-
     sel_name = st.selectbox(
-        "Select athlete",
-        df["name"].tolist(),
-        index=0,
-        label_visibility="collapsed",
+        "Select athlete", df["name"].tolist(), index=0, label_visibility="collapsed"
     )
     sel = df[df["name"] == sel_name].iloc[0]
 
-    cats   = ["Form", "Consistency", "Reliability", "Trajectory"]
-    vals   = [float(sel["score_form"]), float(sel["score_consistency"]),
-              float(sel["score_reliability"]), float(sel["score_trajectory"])]
+    cats = ["Peak Level", "Trajectory", "Comp. Level", "Consistency"]
+    vals = [
+        float(sel["score_peak"]),
+        float(sel["score_trajectory"]),
+        float(sel["score_comp_level"]),
+        float(sel["score_consistency"]),
+    ]
     fig_r = go.Figure(go.Scatterpolar(
-        r     = vals + [vals[0]],
-        theta = cats + [cats[0]],
-        fill  = "toself",
-        fillcolor = "rgba(26, 58, 107, 0.18)",
-        line  = dict(color="#1a3a6b", width=2),
+        r=vals + [vals[0]], theta=cats + [cats[0]],
+        fill="toself",
+        fillcolor="rgba(26, 58, 107, 0.18)",
+        line=dict(color="#1a3a6b", width=2),
     ))
     fig_r.update_layout(
         polar=dict(
-            radialaxis=dict(visible=True, range=[0, 100],
-                           tickvals=[25, 50, 75, 100], tickfont=dict(size=10), gridcolor="#ddd"),
-            angularaxis=dict(tickfont=dict(size=13)),
+            radialaxis=dict(
+                visible=True, range=[0, 100],
+                tickvals=[25, 50, 75, 100], tickfont=dict(size=10), gridcolor="#ddd",
+            ),
+            angularaxis=dict(tickfont=dict(size=12)),
         ),
         showlegend=False, height=300,
         margin=dict(l=40, r=40, t=20, b=10),
@@ -516,54 +572,49 @@ with radar_col:
     )
     st.plotly_chart(fig_r, use_container_width=True)
 
-    traj_word = _trajectory_label(sel.get("momentum_z"))
-    best_fis  = f"{sel['best_fis']:.1f}" if pd.notna(sel.get("best_fis")) else "—"
+    trend_word  = ("Improving" if sel["fis_trend"] < -0.5
+                   else "Declining" if sel["fis_trend"] > 0.5 else "Stable")
+    best_ever   = f"{sel['career_best_fis']:.1f}" if pd.notna(sel.get("career_best_fis")) else "—"
+    trend_str   = f"{sel['improvement_rate']:+.1f}%/mo"
     st.markdown(f"""
 **{sel_name}** · {sel.get('country','') or ''} · Age {int(sel['age'])} (born {int(sel['yob'])}) · {sel['discipline']}
 
 | | |
 |---|---|
 | Scout Rating | **{sel['scout_rating']:.1f}** / 100 |
-| Form (z) | **{sel['mean_z']:+.3f}** |
-| Avg FIS | **{sel['mean_fis']:.1f}** |
-| Best FIS | **{best_fis}** |
-| Consistency | **{sel['score_consistency']:.0f}** / 100 |
-| Reliability | **{sel['dnf_pct']:.1f}%** DNF |
-| Trajectory | **{traj_word}** |
-| All-conditions | **{sel['all_conditions']}** |
-| Career races | **{int(sel['race_count'])}** |
-| Events | **{int(sel['n_disciplines']) if pd.notna(sel.get('n_disciplines')) else 1}** |
+| Peak FIS ({N_PEAK}-race avg) | **{sel['peak_fis']:.1f}** |
+| Career Best FIS | **{best_ever}** |
+| Trend | **{trend_str}** ({trend_word}) |
+| Competition Level | **{sel['comp_level']:.0f}** / 100 |
+| DNF rate | **{sel['dnf_pct']:.1f}%** |
+| Races (18mo) | **{int(sel['rolling_races'])}** |
+| Career races | **{int(sel['career_races'])}** |
     """)
 
 
-# ── Row 2: Scout Rating breakdown bar chart (top 20) ────────────────────────
+# Row 2: Scout Rating breakdown — top 20
 st.divider()
 st.subheader("Scout Rating Breakdown — Top 20")
-st.caption("Each bar shows the weighted contribution of each component to the Scout Rating.")
+st.caption("Weighted contribution of each component to the Scout Rating.")
 
 top20 = df.head(20).copy().sort_values("scout_rating", ascending=True)
-top20["contrib_form"]        = (W_FORM        * top20["score_form"]).round(1)
-top20["contrib_consistency"] = (W_CONSISTENCY * top20["score_consistency"]).round(1)
-top20["contrib_reliability"] = (W_RELIABILITY * top20["score_reliability"]).round(1)
+top20["contrib_peak"]        = (W_PEAK        * top20["score_peak"]).round(1)
 top20["contrib_trajectory"]  = (W_TRAJECTORY  * top20["score_trajectory"]).round(1)
+top20["contrib_comp"]        = (W_COMP_LEVEL  * top20["score_comp_level"]).round(1)
+top20["contrib_consistency"] = (W_CONSISTENCY * top20["score_consistency"]).round(1)
 
 fig_b = go.Figure()
-components = [
-    ("Form",        "contrib_form",        "#1a3a6b"),
-    ("Consistency", "contrib_consistency",  "#2e6da4"),
-    ("Reliability", "contrib_reliability",  "#5ba3d0"),
-    ("Trajectory",  "contrib_trajectory",   "#a8d4f0"),
-]
-for label, col, color in components:
+for label, col, color in [
+    ("Peak Level",    "contrib_peak",        "#1a3a6b"),
+    ("Trajectory",    "contrib_trajectory",   "#2e6da4"),
+    ("Comp. Level",   "contrib_comp",         "#5ba3d0"),
+    ("Consistency",   "contrib_consistency",  "#a8d4f0"),
+]:
     fig_b.add_trace(go.Bar(
-        name=label,
-        y=top20["name"],
-        x=top20[col],
-        orientation="h",
+        name=label, y=top20["name"], x=top20[col], orientation="h",
         marker_color=color,
         hovertemplate=f"<b>%{{y}}</b><br>{label}: %{{x:.1f}} pts<extra></extra>",
     ))
-
 fig_b.update_layout(
     barmode="stack",
     xaxis=dict(title="Weighted contribution to Scout Rating (max 100)"),
@@ -578,34 +629,37 @@ fig_b.update_yaxes(showgrid=False)
 st.plotly_chart(fig_b, use_container_width=True)
 
 
-# ── Row 3: Age vs Form scatter ───────────────────────────────────────────────
+# Row 3: Age vs Peak FIS
 st.divider()
-st.subheader("Age vs Form")
-st.caption("Younger athletes with strong form are the highest-upside prospects.")
-
+st.subheader("Age vs Peak Level")
+st.caption(
+    "Younger athletes with strong FIS points are the highest-upside prospects. "
+    "Y-axis inverted: lower FIS (better) appears higher."
+)
 fig_a = px.scatter(
     df,
     x="age",
-    y="mean_z",
-    size="race_count",
+    y="peak_fis",
+    size="rolling_races",
     color="scout_rating",
     hover_name="name",
     hover_data={
-        "country": True, "yob": True, "race_count": True,
-        "mean_z": ":.3f", "mean_fis": ":.1f", "scout_rating": ":.1f",
+        "country": True, "yob": True, "rolling_races": True,
+        "peak_fis": ":.1f", "career_best_fis": ":.1f",
+        "comp_level": ":.0f", "scout_rating": ":.1f",
     },
     color_continuous_scale="RdYlGn",
     range_color=[0, 100],
     size_max=24,
     labels={
-        "age":          "Age",
-        "mean_z":       "Form — Career mean z-score",
-        "scout_rating": "Scout Rating",
-        "race_count":   "Career Races",
+        "age":         "Age",
+        "peak_fis":    "Peak FIS (lower = faster)",
+        "scout_rating":"Scout Rating",
+        "rolling_races":"Races (18mo)",
     },
     template="plotly_white",
 )
-fig_a.add_hline(y=0, line_dash="dot", line_color="gray", opacity=0.4)
+fig_a.update_yaxes(autorange="reversed")
 fig_a.update_traces(marker_opacity=0.78)
 fig_a.update_layout(
     height=360,
@@ -616,21 +670,21 @@ fig_a.update_layout(
 st.plotly_chart(fig_a, use_container_width=True)
 
 
-# ---------------------------------------------------------------------------
-# Download
-# ---------------------------------------------------------------------------
+# ─── Download ─────────────────────────────────────────────────────────────────
 
 st.divider()
 csv_cols = [
-    "name", "country", "yob", "age", "discipline", "race_type", "race_count",
-    "mean_z", "std_z", "mean_fis", "best_fis", "dnf_pct", "momentum_z",
-    "score_form", "score_consistency", "score_reliability", "score_trajectory",
-    "all_conditions", "n_disciplines", "scout_rating",
+    "name", "country", "yob", "age", "discipline",
+    "rolling_races", "career_races",
+    "peak_fis", "career_best_fis", "rolling_mean_fis",
+    "improvement_rate", "comp_level", "dnf_pct",
+    "score_peak", "score_trajectory", "score_comp_level", "score_consistency",
+    "scout_rating",
 ]
 csv_out = df.reset_index()[[c for c in csv_cols if c in df.columns]].to_csv(index=False)
 st.download_button(
     "Download board as CSV",
     data=csv_out,
-    file_name=f"recruiting_{gender_choice.replace(' ','_')}_{disc_choice}.csv",
+    file_name=f"recruiting_{gender_choice.replace(' ', '_')}_{disc_choice}.csv",
     mime="text/csv",
 )
