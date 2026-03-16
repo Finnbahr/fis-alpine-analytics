@@ -73,10 +73,14 @@ RACE_LEVEL_GROUPS = {
 DISCIPLINES = ["All", "Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine Combined"]
 
 # Scout Rating component weights — must sum to 1.0
-W_PEAK        = 0.35
-W_TRAJECTORY  = 0.30
-W_COMP_LEVEL  = 0.20
-W_CONSISTENCY = 0.15
+# Level is king — exceptional FIS points should always dominate the ranking.
+# Comp level is essential context: same FIS pts at WC vs NJR are not equal.
+# Trajectory: are they still growing? Bonus for improving, not a penalty for arriving.
+# Hit Rate is a warning signal shown as a reference column, not in the composite —
+# ratio metrics have small-sample noise that corrupts rankings at this pool size.
+W_PEAK        = 0.55
+W_COMP_LEVEL  = 0.25
+W_TRAJECTORY  = 0.20
 
 
 # ─── Data loader ──────────────────────────────────────────────────────────────
@@ -180,18 +184,25 @@ def _group_metrics(g: pd.DataFrame) -> dict | None:
     else:
         fis_trend = 0.0
 
-    comp_level = float(g["race_level_weight"].mean())
+    comp_level  = float(g["race_level_weight"].mean())
+    mean_fis    = float(pts.mean())
+
+    # Ceiling hit rate — how close is their avg to their own peak?
+    # Higher = more consistent. Answers "fat race or legitimate?"
+    # peak_fis is avg of best N, mean_fis is avg of all. Ratio always <= 1.
+    ceiling_ratio = round(peak_fis / mean_fis, 4) if mean_fis > 0 else 1.0
 
     return {
         "rolling_races":    n_total,
         "n_finished":       n_fin,
         "dnf_pct":          dnf_pct,
         "peak_fis":         round(peak_fis, 1),
+        "ceiling_ratio":    ceiling_ratio,             # 0–1, higher = more consistent
         "rolling_std":      round(rolling_std, 1),
-        "fis_trend":        round(fis_trend, 3),      # negative = improving
-        "improvement_rate": round(-fis_trend, 3),      # positive = improving (display)
+        "fis_trend":        round(fis_trend, 3),       # negative = improving
+        "improvement_rate": round(-fis_trend, 3),       # positive = improving (display)
         "comp_level":       round(comp_level, 1),
-        "rolling_mean_fis": round(float(pts.mean()), 1),
+        "rolling_mean_fis": round(mean_fis, 1),
         "career_races":     int(g["career_races"].iloc[0]) if g["career_races"].notna().any() else n_total,
         "career_best_fis":  round(float(g["career_best_fis"].dropna().min()), 1)
                             if g["career_best_fis"].notna().any() else round(peak_fis, 1),
@@ -236,19 +247,26 @@ def _pct_rank(series: pd.Series, ascending: bool = True) -> pd.Series:
 
 def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
     df = df.copy()
-    # Lower FIS points = better athlete → ascending=False gives high score to low points
-    df["score_peak"]        = _pct_rank(df["peak_fis"],    ascending=False)
-    # More negative fis_trend = faster improvement → ascending=False gives high score to negative values
-    df["score_trajectory"]  = _pct_rank(df["fis_trend"],   ascending=False)
-    # Higher comp_level weight = tougher fields → ascending=True
-    df["score_comp_level"]  = _pct_rank(df["comp_level"],  ascending=True)
-    # Lower rolling_std = more reliable ceiling → ascending=False
-    df["score_consistency"] = _pct_rank(df["rolling_std"], ascending=False)
+
+    # 1. Level — lower FIS points = better. This is the dominant signal.
+    df["score_peak"]       = _pct_rank(df["peak_fis"],   ascending=False)
+
+    # 2. Competition level — higher = racing tougher fields.
+    #    Critical context: 17 FIS at a WC race and 17 FIS at a thin NJR are not equal.
+    df["score_comp_level"] = _pct_rank(df["comp_level"], ascending=True)
+
+    # 3. Trajectory — bonus for athletes still improving. Normalised slope so that
+    #    an already-elite athlete with a flat trend is not penalised.
+    df["score_trajectory"] = _pct_rank(df["fis_trend"],  ascending=False)
+
+    # Hit Rate (ceiling_ratio) is NOT included in the composite — ratio metrics have
+    # small-sample noise that corrupts rankings. It's displayed as a reference column
+    # so the scout can eyeball "peak=30 but avg=70" directly.
+
     df["scout_rating"] = (
         W_PEAK        * df["score_peak"]
-        + W_TRAJECTORY  * df["score_trajectory"]
         + W_COMP_LEVEL  * df["score_comp_level"]
-        + W_CONSISTENCY * df["score_consistency"]
+        + W_TRAJECTORY  * df["score_trajectory"]
     ).round(1)
     return df
 
@@ -270,29 +288,30 @@ with st.expander("How Scout Rating is calculated", expanded=False):
 
 | Component | Weight | Method |
 |---|---|---|
-| **Peak Level** | {W_PEAK:.0%} | Average of your **best {N_PEAK} FIS results** in the last {ROLLING_MONTHS} months. Golf-handicap style — one bad day at a World Cup does not tank your score. Lower FIS = better. |
-| **Trajectory** | {W_TRAJECTORY:.0%} | Linear slope of your FIS points over the {ROLLING_MONTHS}-month window. Dropping 3 pts/month at 60 pts avg is a stronger signal than the same drop at 120 pts — slope is normalised as **% of mean per month** so it's fair across ability levels. |
-| **Competition Level** | {W_COMP_LEVEL:.0%} | Weighted avg of every race entered (WC=100, EC=80, Nor-Am/CIT=65, FIS=50, NJR=30). Athletes who race European Cup fields at 16 get explicit credit for it. |
-| **Consistency** | {W_CONSISTENCY:.0%} | Std of their best {N_STD} FIS results. Measures how reliably they hit their ceiling — a tight spread means they perform under pressure. Independent of trajectory. |
+| **Peak Level** | {W_PEAK:.0%} | Average of your **best {N_PEAK} FIS results** in the last {ROLLING_MONTHS} months. Golf-handicap style — one hard race does not tank the score. Lower FIS = better. Absolute performance level is the dominant signal. |
+| **Competition Level** | {W_COMP_LEVEL:.0%} | Weighted avg of every race entered (WC=100, EC=80, Nor-Am/CIT=65, FIS=50, NJR=30). The same FIS points at a WC field mean more than at a thin NJR. Athletes who seek out tougher races get credit. |
+| **Trajectory** | {W_TRAJECTORY:.0%} | FIS points slope normalised as % of mean/month. **Positive = getting faster.** Bonus for athletes still climbing — not a penalty for athletes who have already arrived. |
+
+**Hit Rate (`Peak FIS ÷ Avg FIS`) is shown as a reference column, not in the composite.** Ratio metrics have small-sample noise that corrupts rankings at junior pool sizes. Use it yourself as a "fat race" filter: peak=17, avg=17, hit=100% → consistently elite. Peak=30, avg=70, hit=43% → scrutinise before committing.
 
 **Column guide:**
 
 | Column | Meaning |
 |---|---|
-| **Peak FIS** | Avg of best {N_PEAK} FIS points in the rolling window. Primary level indicator. Lower = faster. |
-| **Best Ever** | All-time career-best single FIS result — their absolute ceiling. |
-| **Avg FIS (rolling)** | Mean of all finishes in window. Higher than Peak FIS — includes hard-field days. Reference only. |
-| **Trend (%/mo)** | FIS points improvement rate per month, normalised to % of their mean. **Positive = getting faster.** e.g. +2.5 means dropping ~2.5% of their avg FIS points every month. |
-| **Comp. Level** | Avg race level weight 0–100. 80+ = primarily EC/WC circuit. 50 = FIS. 35 = junior national. |
-| **Consistency** | 0–100. 90+ = very reliable results near their ceiling. <40 = wide spread. |
-| **DNF %** | % not finished. Reference only — not in Scout Rating composite. |
-| **Scout Rating** | Composite: {W_PEAK:.0%} Peak + {W_TRAJECTORY:.0%} Trajectory + {W_COMP_LEVEL:.0%} Comp. Level + {W_CONSISTENCY:.0%} Consistency. 100 = best in current pool. |
+| **Peak FIS** | Avg of best {N_PEAK} FIS points in the rolling {ROLLING_MONTHS}-month window. Primary level indicator. Lower = faster. |
+| **Best Ever** | All-time career-best single FIS result. Their absolute ceiling. |
+| **Avg FIS (rolling)** | Mean of all finishes in rolling window. Compare with Peak FIS to spot inconsistency. |
+| **Hit Rate** | Peak FIS ÷ Avg FIS as %. 90%+ = near-ceiling consistently. Below 65% = big gap, check the race list. Reference only. |
+| **Trend (%/mo)** | FIS improvement per month as % of their mean. Positive = getting faster. +2.5 means improving ~2.5%/month. |
+| **Comp. Level** | Avg race level 0–100. 80+ = EC/WC circuit. 50 = FIS. 35 = junior national. |
+| **DNF %** | % not finished. Reference — not in Scout Rating. |
+| **Scout Rating** | Composite: {W_PEAK:.0%} Peak Level + {W_COMP_LEVEL:.0%} Comp. Level + {W_TRAJECTORY:.0%} Trajectory. 100 = best in current pool. |
 
-**Reading Trajectory vs Peak Level together:**
-High Trajectory + high Peak Level = best profile — already fast, still improving.
-High Trajectory + moderate Peak Level = breakout candidate — not there yet but moving fast.
-High Peak Level + flat Trajectory = established but potentially plateaued — check their age.
-Low Trajectory at young age = early sign, but may just need races — weight Career Races accordingly.
+**Reading the board:**
+Strong Peak FIS + high Hit Rate + high Comp. Level = the real deal. Recruit without hesitation.
+Strong Peak FIS + low Hit Rate = had a great day or two — check Avg FIS and race list before committing.
+Modest Peak FIS + strong Trajectory = still climbing. Project forward: where are they in 12 months?
+High Comp. Level + modest FIS at young age = racing hard fields early. Discount the FIS slightly vs pure FIS-circuit peers.
     """)
 
 
@@ -408,17 +427,19 @@ display_cols = {
     "peak_fis":         "Peak FIS",
     "career_best_fis":  "Best Ever",
     "rolling_mean_fis": "Avg FIS (rolling)",
+    "hit_rate_pct":     "Hit Rate",
     "improvement_rate": "Trend (%/mo)",
     "comp_level":       "Comp. Level",
     "dnf_pct":          "DNF %",
     "score_peak":       "Level Score",
-    "score_trajectory": "Trajectory",
     "score_comp_level": "Comp. Score",
-    "score_consistency":"Consistency",
+    "score_trajectory": "Trajectory",
     "scout_rating":     "Scout Rating",
 }
 
-table = df[list(display_cols.keys())].rename(columns=display_cols)
+df["hit_rate_pct"] = (df["ceiling_ratio"] * 100).round(1)
+
+table = df[[c for c in display_cols.keys() if c in df.columns]].rename(columns=display_cols)
 table["YOB"]          = table["YOB"].astype("Int64")
 table["Age"]          = table["Age"].astype("Int64")
 table["Career Races"] = table["Career Races"].astype("Int64")
@@ -430,25 +451,24 @@ st.dataframe(
     column_config={
         "Scout Rating": st.column_config.ProgressColumn(
             "Scout Rating", format="%.1f", min_value=0, max_value=100,
-            help=f"Composite: {W_PEAK:.0%} Peak + {W_TRAJECTORY:.0%} Trajectory + "
-                 f"{W_COMP_LEVEL:.0%} Comp. Level + {W_CONSISTENCY:.0%} Consistency. "
-                 "Percentile within current pool.",
+            help=f"Composite: {W_PEAK:.0%} Peak Level + {W_COMP_LEVEL:.0%} Comp. Level + "
+                 f"{W_TRAJECTORY:.0%} Trajectory. Percentile within current pool.",
         ),
         "Level Score": st.column_config.ProgressColumn(
             "Level Score", format="%.0f", min_value=0, max_value=100,
             help=f"Percentile rank of Peak FIS (avg best {N_PEAK}). 100 = fastest in pool.",
         ),
-        "Trajectory": st.column_config.ProgressColumn(
-            "Trajectory", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of FIS points improvement slope. 100 = fastest rate of improvement.",
-        ),
         "Comp. Score": st.column_config.ProgressColumn(
             "Comp. Score", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of avg competition level weight. 100 = consistently races toughest fields.",
+            help="Percentile rank of avg competition level. 100 = consistently races toughest fields.",
         ),
-        "Consistency": st.column_config.ProgressColumn(
-            "Consistency", format="%.0f", min_value=0, max_value=100,
-            help=f"Percentile rank of std of best {N_STD} results. 100 = most reliable ceiling.",
+        "Trajectory": st.column_config.ProgressColumn(
+            "Trajectory", format="%.0f", min_value=0, max_value=100,
+            help="Percentile rank of FIS improvement slope. 100 = fastest rate of improvement. Bonus for climbers, not a penalty for established elites.",
+        ),
+        "Hit Rate": st.column_config.NumberColumn(
+            "Hit Rate", format="%.1f%%",
+            help="Peak FIS ÷ Avg FIS as %. Reference — not in composite. 90%+ = near-ceiling consistently. Below 65% = big spread, check race history.",
         ),
         "Peak FIS":          st.column_config.NumberColumn(
             "Peak FIS", format="%.1f",
@@ -545,12 +565,11 @@ with radar_col:
     )
     sel = df[df["name"] == sel_name].iloc[0]
 
-    cats = ["Peak Level", "Trajectory", "Comp. Level", "Consistency"]
+    cats = ["Peak Level", "Comp. Level", "Trajectory"]
     vals = [
         float(sel["score_peak"]),
-        float(sel["score_trajectory"]),
         float(sel["score_comp_level"]),
-        float(sel["score_consistency"]),
+        float(sel["score_trajectory"]),
     ]
     fig_r = go.Figure(go.Scatterpolar(
         r=vals + [vals[0]], theta=cats + [cats[0]],
@@ -576,6 +595,7 @@ with radar_col:
                    else "Declining" if sel["fis_trend"] > 0.5 else "Stable")
     best_ever   = f"{sel['career_best_fis']:.1f}" if pd.notna(sel.get("career_best_fis")) else "—"
     trend_str   = f"{sel['improvement_rate']:+.1f}%/mo"
+    hit_rate    = f"{sel['hit_rate_pct']:.1f}%"
     st.markdown(f"""
 **{sel_name}** · {sel.get('country','') or ''} · Age {int(sel['age'])} (born {int(sel['yob'])}) · {sel['discipline']}
 
@@ -583,6 +603,8 @@ with radar_col:
 |---|---|
 | Scout Rating | **{sel['scout_rating']:.1f}** / 100 |
 | Peak FIS ({N_PEAK}-race avg) | **{sel['peak_fis']:.1f}** |
+| Avg FIS (rolling) | **{sel['rolling_mean_fis']:.1f}** |
+| Ceiling Hit Rate | **{hit_rate}** |
 | Career Best FIS | **{best_ever}** |
 | Trend | **{trend_str}** ({trend_word}) |
 | Competition Level | **{sel['comp_level']:.0f}** / 100 |
@@ -598,17 +620,15 @@ st.subheader("Scout Rating Breakdown — Top 20")
 st.caption("Weighted contribution of each component to the Scout Rating.")
 
 top20 = df.head(20).copy().sort_values("scout_rating", ascending=True)
-top20["contrib_peak"]        = (W_PEAK        * top20["score_peak"]).round(1)
-top20["contrib_trajectory"]  = (W_TRAJECTORY  * top20["score_trajectory"]).round(1)
-top20["contrib_comp"]        = (W_COMP_LEVEL  * top20["score_comp_level"]).round(1)
-top20["contrib_consistency"] = (W_CONSISTENCY * top20["score_consistency"]).round(1)
+top20["contrib_peak"] = (W_PEAK        * top20["score_peak"]).round(1)
+top20["contrib_comp"] = (W_COMP_LEVEL  * top20["score_comp_level"]).round(1)
+top20["contrib_traj"] = (W_TRAJECTORY  * top20["score_trajectory"]).round(1)
 
 fig_b = go.Figure()
 for label, col, color in [
-    ("Peak Level",    "contrib_peak",        "#1a3a6b"),
-    ("Trajectory",    "contrib_trajectory",   "#2e6da4"),
-    ("Comp. Level",   "contrib_comp",         "#5ba3d0"),
-    ("Consistency",   "contrib_consistency",  "#a8d4f0"),
+    ("Peak Level",  "contrib_peak", "#1a3a6b"),
+    ("Comp. Level", "contrib_comp", "#2e6da4"),
+    ("Trajectory",  "contrib_traj", "#5ba3d0"),
 ]:
     fig_b.add_trace(go.Bar(
         name=label, y=top20["name"], x=top20[col], orientation="h",
@@ -676,9 +696,9 @@ st.divider()
 csv_cols = [
     "name", "country", "yob", "age", "discipline",
     "rolling_races", "career_races",
-    "peak_fis", "career_best_fis", "rolling_mean_fis",
+    "peak_fis", "career_best_fis", "rolling_mean_fis", "hit_rate_pct",
     "improvement_rate", "comp_level", "dnf_pct",
-    "score_peak", "score_trajectory", "score_comp_level", "score_consistency",
+    "score_peak", "score_comp_level", "score_trajectory",
     "scout_rating",
 ]
 csv_out = df.reset_index()[[c for c in csv_cols if c in df.columns]].to_csv(index=False)
