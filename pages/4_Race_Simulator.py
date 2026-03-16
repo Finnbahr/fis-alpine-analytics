@@ -96,46 +96,57 @@ with st.expander("How the Simulator Works"):
 
 with st.expander("Model Accuracy — Backtesting Results"):
     st.markdown(
-        """
-        The model was validated on **310 World Cup races from 2022 onward** — each race simulated
-        using only data available before race day, then compared against actual results.
-        No future information was used at any point.
-
-        Results by discipline (2,000 simulations per race, combined Men and Women):
-        """
+        "Walk-forward backtest — each race simulated using only data available before race day. "
+        "No future information used at any point."
     )
 
     import pandas as _pd
-    _bt = _pd.DataFrame({
-        "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
-        "Races (M+W)":     [90, 79, 66, 75],
-        "Spearman Rho":    ["0.612", "0.664", "0.686", "0.684"],
-        "Winner %":        ["34%", "46%", "21%", "24%"],
-        "Top-3 %":         ["42%", "42%", "38%", "35%"],
-        "Avg. Rank Error": ["7.7", "7.3", "7.5", "8.0"],
-    })
-    st.dataframe(_bt, use_container_width=True, hide_index=True)
+    _tab_wc, _tab_fis = st.tabs(["World Cup", "FIS"])
+
+    with _tab_wc:
+        st.markdown("**310 World Cup races (2022+), 2,000 simulations per race, combined Men and Women.**")
+        _bt_wc = _pd.DataFrame({
+            "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+            "Races (M+W)":     [90, 79, 66, 75],
+            "Spearman Rho":    ["0.612", "0.664", "0.686", "0.684"],
+            "MAE":             ["7.7", "7.3", "7.5", "8.0"],
+            "Top-3 %":         ["42%", "42%", "38%", "35%"],
+            "Winner %":        ["34%", "46%", "21%", "24%"],
+        })
+        st.dataframe(_bt_wc, use_container_width=True, hide_index=True)
+
+    with _tab_fis:
+        st.markdown(
+            "**5,428 FIS races (2022+), 2,000 simulations per race, combined Men and Women.** "
+            "FIS fields are wider and less predictable at the top — winner% is lower than WC "
+            "but Spearman Rho is comparable, reflecting that rank order across the full field "
+            "is well predicted even when the winner is harder to call."
+        )
+        _bt_fis = _pd.DataFrame({
+            "Discipline":      ["Slalom", "Giant Slalom", "Super G", "Downhill"],
+            "Races (M+W)":     [2739, 1985, 494, 210],
+            "Spearman Rho":    ["0.725", "0.738", "0.639", "0.529"],
+            "MAE":             ["8.82", "9.65", "9.44", "10.71"],
+            "Top-3 %":         ["27%", "30%", "31%", "26%"],
+            "Winner %":        ["16%", "17%", "18%", "13%"],
+        })
+        st.dataframe(_bt_fis, use_container_width=True, hide_index=True)
+        st.caption(
+            "For reference — XGBoost model on the same FIS window: "
+            "SL rho=0.883 / winner=41%, GS rho=0.880 / winner=39%, "
+            "SG rho=0.777 / winner=29%, DH rho=0.718 / winner=27%. "
+            "XGBoost outperforms Monte Carlo at FIS level because its ranker "
+            "trains directly on FIS race history; MC calibration is tuned to WC fields."
+        )
 
     st.markdown(
         """
         **How to read these numbers:**
 
-        - **Spearman Rho** — rank correlation between predicted and actual finishing order among
-          finishers (1.0 = perfect, 0 = no relationship). Values of 0.61–0.69 indicate a strong,
-          statistically significant relationship.
-        - **Winner %** — fraction of races where the model's top-ranked athlete actually won.
-          A random pick from a 60-athlete field would win roughly 1.7% of the time.
+        - **Spearman Rho** — rank correlation between predicted and actual finishing order (1.0 = perfect).
+        - **MAE** — mean absolute rank error across all finishers. Predicting by bib order alone averages 9–10 positions of error on WC.
         - **Top-3 %** — fraction of actual podium athletes captured in the model's predicted top 3.
-        - **Avg. Rank Error** — mean positional error across all finishers. Predicting by bib
-          order alone averages 9–10 positions of error.
-
-        **FIS and European Cup races**
-
-        The simulator supports all race types via the Race Type selector in the sidebar.
-        A cross-level validation study using the companion XGBoost model found that the
-        underlying performance signals transfer cleanly to FIS races — Spearman Rho of
-        0.88 for Slalom and 0.88 for Giant Slalom across 5,600+ FIS races (2022+), with
-        lower rank error than at World Cup level due to wider field spread.
+        - **Winner %** — fraction of races where the model's top pick actually won. A random pick from a 60-athlete WC field wins ~1.7% of the time.
         """
     )
 
