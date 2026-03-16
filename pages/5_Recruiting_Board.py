@@ -70,7 +70,7 @@ RACE_LEVEL_GROUPS = {
                         "National Championships", "Entry League FIS"],
 }
 
-DISCIPLINES = ["All", "Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine Combined"]
+DISCIPLINES = ["Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine Combined"]
 
 # Scout Rating component weights — must sum to 1.0
 # Level is king — exceptional FIS points should always dominate the ranking.
@@ -78,9 +78,9 @@ DISCIPLINES = ["All", "Slalom", "Giant Slalom", "Super G", "Downhill", "Alpine C
 # Trajectory: are they still growing? Bonus for improving, not a penalty for arriving.
 # Hit Rate is a warning signal shown as a reference column, not in the composite —
 # ratio metrics have small-sample noise that corrupts rankings at this pool size.
-W_PEAK        = 0.55
-W_COMP_LEVEL  = 0.25
-W_TRAJECTORY  = 0.20
+W_PEAK        = 0.65
+W_COMP_LEVEL  = 0.20
+W_TRAJECTORY  = 0.15
 
 
 # ─── Data loader ──────────────────────────────────────────────────────────────
@@ -305,7 +305,7 @@ with st.expander("How Scout Rating is calculated", expanded=False):
 | **Trend (%/mo)** | FIS improvement per month as % of their mean. Positive = getting faster. +2.5 means improving ~2.5%/month. |
 | **Comp. Level** | Avg race level 0–100. 80+ = EC/WC circuit. 50 = FIS. 35 = junior national. |
 | **DNF %** | % not finished. Reference — not in Scout Rating. |
-| **Scout Rating** | Composite: {W_PEAK:.0%} Peak Level + {W_COMP_LEVEL:.0%} Comp. Level + {W_TRAJECTORY:.0%} Trajectory. 100 = best in current pool. |
+| **Scout Rating** | Composite: {W_PEAK:.0%} Peak Level + {W_COMP_LEVEL:.0%} Comp. Level + {W_TRAJECTORY:.0%} Trajectory. 100 = best in current pool. Top 250 shown. |
 
 **Reading the board:**
 Strong Peak FIS + high Hit Rate + high Comp. Level = the real deal. Recruit without hesitation.
@@ -330,7 +330,7 @@ if raw_df.empty:
 st.sidebar.header("Filters")
 
 gender_choice = st.sidebar.radio("Gender", ["Men's", "Women's"], horizontal=True)
-disc_choice   = st.sidebar.selectbox("Discipline", DISCIPLINES)
+disc_choice   = st.sidebar.selectbox("Discipline", DISCIPLINES, index=0)
 level_choice  = st.sidebar.selectbox("Race Level", list(RACE_LEVEL_GROUPS.keys()))
 
 # Race type and gender filters are applied to raw race rows before building
@@ -339,8 +339,7 @@ race_types   = RACE_LEVEL_GROUPS[level_choice]
 filtered_raw = raw_df[raw_df["sex"] == gender_choice].copy()
 if race_types is not None:
     filtered_raw = filtered_raw[filtered_raw["race_type"].isin(race_types)]
-if disc_choice != "All":
-    filtered_raw = filtered_raw[filtered_raw["discipline"] == disc_choice]
+filtered_raw = filtered_raw[filtered_raw["discipline"] == disc_choice]
 
 if filtered_raw.empty:
     st.info("No athletes match the current filters.")
@@ -387,29 +386,13 @@ if df.empty:
     st.info("No athletes match the current filters. Try relaxing the requirements.")
     st.stop()
 
-# For "All" disciplines: keep each athlete's best-FIS-points discipline row
-if disc_choice == "All":
-    df = df.sort_values("peak_fis").drop_duplicates("fis_code").copy()
-
-
 # ─── Score and sort ───────────────────────────────────────────────────────────
 
 df = compute_scout_rating(df)
-df = df.sort_values("scout_rating", ascending=False).reset_index(drop=True)
+df = df.sort_values("scout_rating", ascending=False).head(250).reset_index(drop=True)
 df.index += 1
 df.index.name = "Rank"
 df["age"] = CURRENT_YEAR - df["yob"].astype(int)
-
-
-# ─── Summary metrics ──────────────────────────────────────────────────────────
-
-c1, c2, c3, c4 = st.columns(4)
-c1.metric("Athletes ranked", len(df))
-c2.metric("Median Peak FIS", f"{df['peak_fis'].median():.1f}")
-c3.metric("Improving", f"{(df['fis_trend'] < 0).sum()} / {len(df)}")
-c4.metric("Median comp. level", f"{df['comp_level'].median():.0f} / 100")
-
-st.divider()
 
 
 # ─── Leaderboard table ────────────────────────────────────────────────────────
