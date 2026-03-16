@@ -116,6 +116,16 @@ def load_recruiting_data() -> pd.DataFrame:
             FROM athlete_aggregate.performance_consistency_career
             WHERE races >= 3
             GROUP BY fis_code
+        ),
+        best_fis_cte AS (
+            SELECT
+                fr.fis_code::text AS fis_code,
+                rd.discipline,
+                MIN(fr.fis_points) AS best_fis
+            FROM raw.fis_results fr
+            JOIN raw.race_details rd ON rd.race_id = fr.race_id
+            WHERE fr.fis_points IS NOT NULL AND fr.fis_points > 0
+            GROUP BY fr.fis_code, rd.discipline
         )
         SELECT
             pc.fis_code,
@@ -130,7 +140,7 @@ def load_recruiting_data() -> pd.DataFrame:
             ROUND(pc.mean_race_z_score::numeric, 3)        AS mean_z,
             ROUND(pc.std_race_z_score::numeric, 3)         AS std_z,
             ROUND(pc.mean_fis::numeric, 1)                 AS mean_fis,
-            ROUND(pc.min_fis_points::numeric, 1)           AS best_fis,
+            ROUND(bf.best_fis::numeric, 1)                 AS best_fis,
             -- Reliability
             ROUND((pc.dnf_rate * 100)::numeric, 1)         AS dnf_pct,
             pc.max_dnf_streak                              AS max_dnf_streak,
@@ -150,6 +160,8 @@ def load_recruiting_data() -> pd.DataFrame:
         LEFT JOIN weather_versatility wv ON wv.fis_code  = pc.fis_code
                                           AND wv.discipline = pc.discipline
         LEFT JOIN disc_versatility  dv ON dv.fis_code = pc.fis_code
+        LEFT JOIN best_fis_cte      bf ON bf.fis_code  = pc.fis_code
+                                       AND bf.discipline = pc.discipline
         WHERE pc.races >= 3
           AND pc.mean_race_z_score IS NOT NULL
     """)
