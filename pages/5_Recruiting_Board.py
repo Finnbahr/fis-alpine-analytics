@@ -26,12 +26,10 @@ from database import query
 CURRENT_YEAR = 2026
 
 COHORTS = {
-    "U21 & under  (born 2005+)": (2005, CURRENT_YEAR),
-    "U18  (born 2008+)":         (2008, CURRENT_YEAR),
-    "U21  (born 2005–2007)":     (2005, 2007),
-    "U23  (born 2003–2004)":     (2003, 2004),
-    "Young Senior  (born 1998–2002)": (1998, 2002),
-    "Custom range":               None,
+    "U18  (born 2008+)":             (2008, CURRENT_YEAR),
+    "U21  (born 2005–2007)":         (2005, 2007),
+    "U23  (born 2003–2004)":         (2003, 2004),
+    "Custom range":                   None,
 }
 
 RACE_LEVEL_GROUPS = {
@@ -69,11 +67,11 @@ W_TRAJECTORY  = 0.15
 # ---------------------------------------------------------------------------
 
 @st.cache_data(ttl=604800)
-def load_recruiting_data() -> pd.DataFrame:
+def load_recruiting_data(season_year: int) -> pd.DataFrame:
     """
-    Pull athlete recruiting data: field-normalised z-score performance,
-    consistency, DNF reliability, current trajectory, and weather versatility.
-    One row per athlete × discipline × race_type.
+    Pull athlete recruiting data for a specific season year.
+    Performance metrics come from the yearly table; career totals and
+    career-best FIS are joined from the career table.
     """
     return query("""
         WITH
@@ -103,14 +101,25 @@ def load_recruiting_data() -> pd.DataFrame:
             ) g
             ORDER BY fis_code, cnt DESC
         ),
-        -- Most recent hot-streak state per athlete × discipline
+        -- Career totals: total races, career-best FIS, career mean FIS
+        career_totals AS (
+            SELECT
+                fis_code,
+                discipline,
+                race_type,
+                SUM(race_count)             AS career_races,
+                MIN(min_fis_points)         AS career_best_fis,
+                AVG(mean_fis_points)        AS career_mean_fis
+            FROM athlete_aggregate.basic_athlete_info_career
+            GROUP BY fis_code, discipline, race_type
+        ),
+        -- Most recent hot-streak state per athlete × discipline (trajectory)
         latest_streak AS (
             SELECT DISTINCT ON (fis_code, discipline)
                 fis_code,
                 discipline,
                 ewma_race_z,
-                momentum_z,
-                race_count AS streak_races
+                momentum_z
             FROM athlete_aggregate.hot_streak
             WHERE race_z_score IS NOT NULL
             ORDER BY fis_code, discipline, date DESC
@@ -121,9 +130,7 @@ def load_recruiting_data() -> pd.DataFrame:
                 fis_code,
                 discipline,
                 STDDEV(avg_z_score)  AS weather_std,
-                COUNT(*)             AS weather_bin_count,
-                AVG(avg_z_score)     AS weather_mean_z,
-                MIN(avg_z_score)     AS weather_worst_z
+                COUNT(*)             AS weather_bin_count
             FROM athlete_aggregate.weather_performance
             GROUP BY fis_code, discipline
             HAVING COUNT(*) >= 3
@@ -136,44 +143,47 @@ def load_recruiting_data() -> pd.DataFrame:
             GROUP BY fis_code
         )
         SELECT
-            pc.fis_code,
-            pc.name,
-            pc.discipline,
-            pc.race_type,
-            pc.races                                        AS race_count,
+            py.fis_code,
+            py.name,
+            py.discipline,
+            py.race_type,
+            -- Season metrics
+            py.races                                        AS season_races,
+            ROUND(py.mean_race_z_score::numeric, 3)        AS mean_z,
+            ROUND(py.std_race_z_score::numeric, 3)         AS std_z,
+            ROUND((py.dnf_rate * 100)::numeric, 1)         AS dnf_pct,
+            ROUND(py.mean_fis::numeric, 1)                 AS season_mean_fis,
+            -- Career context
+            ct.career_races,
+            ROUND(ct.career_best_fis::numeric, 1)          AS career_best_fis,
+            ROUND(ct.career_mean_fis::numeric, 1)          AS career_mean_fis,
+            -- Demographics
             yc.yob,
             yc.country,
             gm.sex,
-            -- Field-normalised performance (z-score: positive = above field avg)
-            ROUND(pc.mean_race_z_score::numeric, 3)        AS mean_z,
-            ROUND(pc.std_race_z_score::numeric, 3)         AS std_z,
-            ROUND(pc.cv_race_z::numeric, 3)                AS cv_z,
-            -- DNF / reliability
-            ROUND((pc.dnf_rate * 100)::numeric, 1)         AS dnf_pct,
-            pc.max_dnf_streak                              AS max_dnf_streak,
-            -- Bounce-back
-            ROUND(pc.bounce_back_z_score::numeric, 3)      AS bounce_back_z,
-            ROUND((pc.re_dnf_rate * 100)::numeric, 1)      AS re_dnf_pct,
-            -- Trajectory / current form (from hot streak)
+            -- Trajectory
             ROUND(ls.ewma_race_z::numeric, 3)              AS current_form_z,
             ROUND(ls.momentum_z::numeric, 3)               AS momentum_z,
             -- Weather versatility
             ROUND(wv.weather_std::numeric, 3)              AS weather_std,
             wv.weather_bin_count,
-            ROUND(wv.weather_worst_z::numeric, 3)          AS weather_worst_z,
             -- Versatility
             dv.n_disciplines
-        FROM athlete_aggregate.performance_consistency_career pc
-        LEFT JOIN yob_country     yc ON yc.fis_code = pc.fis_code
-        LEFT JOIN gender_map      gm ON gm.fis_code = pc.fis_code
-        LEFT JOIN latest_streak   ls ON ls.fis_code = pc.fis_code
-                                     AND ls.discipline = pc.discipline
-        LEFT JOIN weather_versatility wv ON wv.fis_code = pc.fis_code
-                                         AND wv.discipline = pc.discipline
-        LEFT JOIN disc_versatility dv ON dv.fis_code = pc.fis_code
-        WHERE pc.races >= 3
-          AND pc.mean_race_z_score IS NOT NULL
-    """)
+        FROM athlete_aggregate.performance_consistency_yearly py
+        LEFT JOIN career_totals   ct ON ct.fis_code  = py.fis_code
+                                     AND ct.discipline = py.discipline
+                                     AND ct.race_type  = py.race_type
+        LEFT JOIN yob_country     yc ON yc.fis_code = py.fis_code
+        LEFT JOIN gender_map      gm ON gm.fis_code = py.fis_code
+        LEFT JOIN latest_streak   ls ON ls.fis_code  = py.fis_code
+                                     AND ls.discipline = py.discipline
+        LEFT JOIN weather_versatility wv ON wv.fis_code  = py.fis_code
+                                         AND wv.discipline = py.discipline
+        LEFT JOIN disc_versatility dv ON dv.fis_code = py.fis_code
+        WHERE py.year  = :yr
+          AND py.races >= 3
+          AND py.mean_race_z_score IS NOT NULL
+    """, {"yr": season_year})
 
 
 # ---------------------------------------------------------------------------
@@ -199,14 +209,15 @@ def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
     # 1. Form: higher mean_z = better
     df["score_form"] = _pct_rank(df["mean_z"], ascending=True)
 
-    # 2. Consistency: lower cv_z = better (use std_z as fallback)
-    cv = df["cv_z"].where(df["cv_z"].notna(), df["std_z"])
-    df["score_consistency"] = _pct_rank(cv, ascending=False)
+    # 2. Consistency: lower std_z = better (day-to-day spread around their own level)
+    #    Uses std_race_z_score, not CV — so a consistently improving athlete is not
+    #    penalised purely for trending upward; variance is measured in z-score units.
+    df["score_consistency"] = _pct_rank(df["std_z"].fillna(df["std_z"].median()), ascending=False)
 
     # 3. Reliability: lower dnf_pct = better
     df["score_reliability"] = _pct_rank(df["dnf_pct"], ascending=False)
 
-    # 4. Trajectory: higher momentum_z = better (improving athlete)
+    # 4. Trajectory: higher momentum_z = better (currently improving)
     traj = df["momentum_z"].fillna(0.0)
     df["score_trajectory"] = _pct_rank(traj, ascending=True)
 
@@ -236,7 +247,7 @@ st.markdown(
     "Field-normalised performance, consistency, reliability, and trajectory — "
     "four dimensions that together reveal development potential far better than "
     "raw FIS points alone. Scores are relative to whoever is currently in the "
-    "filtered pool; changing filters recalculates all ratings."
+    "filtered pool."
 )
 
 with st.expander("How Scout Rating is calculated", expanded=False):
@@ -246,31 +257,24 @@ the current filtered pool and then weighted:
 
 | Component | Weight | Signal | Direction |
 |---|---|---|---|
-| **Form** | {W_FORM:.0%} | Mean z-score vs field across all races | Higher = above-average finisher |
-| **Consistency** | {W_CONSISTENCY:.0%} | CV of z-scores (spread relative to own mean) | Lower = more reliable |
+| **Form** | {W_FORM:.0%} | Mean z-score vs field for the selected season | Higher = above-average finisher |
+| **Consistency** | {W_CONSISTENCY:.0%} | Std of z-scores (day-to-day spread around own level) | Lower = more predictable |
 | **Reliability** | {W_RELIABILITY:.0%} | DNF / DSQ / DNS rate | Lower = finishes races |
 | **Trajectory** | {W_TRAJECTORY:.0%} | Momentum z (recent vs career baseline) | Higher = currently improving |
 
-**Z-score explained:** A z-score of 0 means the athlete finished exactly at field average
-for every race. +0.5 is comfortably above average; +1.0+ is top-tier. Unlike FIS points,
-z-scores adjust for field strength — winning a FIS race against 80 athletes scores similarly
-to a strong finish in a World Cup.
+**On consistency vs trajectory:** Consistency measures how much an athlete varies race-to-race
+around their own level. Trajectory measures whether that level is moving up or down. An athlete
+on a strong upward trend will naturally show some variance — look at both scores together.
+A high Trajectory + moderate Consistency is a very different profile to high Consistency + flat Trajectory.
+
+**Z-score explained:** A z-score of 0 means the athlete finished exactly at field average.
++0.5 is comfortably above average; +1.0+ is top-tier. Unlike FIS points, z-scores adjust
+for field strength — a dominant FIS result against 80 athletes scores similarly to a strong
+Europa Cup finish. FIS points are shown alongside for familiar reference.
 
 **Weather versatility** is shown as a separate indicator and does not affect Scout Rating.
-It requires at least 3 condition bins of history to be meaningful.
+It requires at least 3 condition bins of history.
     """)
-
-
-# ---------------------------------------------------------------------------
-# Data load
-# ---------------------------------------------------------------------------
-
-with st.spinner("Loading athlete data..."):
-    df_all = load_recruiting_data()
-
-if df_all.empty:
-    st.error("No data available.")
-    st.stop()
 
 
 # ---------------------------------------------------------------------------
@@ -285,9 +289,14 @@ disc_choice = st.sidebar.selectbox("Discipline", DISCIPLINES)
 
 level_choice = st.sidebar.selectbox("Race Level", list(RACE_LEVEL_GROUPS.keys()))
 
-cohort_choice = st.sidebar.selectbox(
-    "Age Cohort", list(COHORTS.keys()), index=0
+season_year = st.sidebar.selectbox(
+    "Season",
+    [2026, 2025, 2024, 2023, 2022, 2021],
+    index=1,
+    help="Performance metrics are from this season. Career race count spans all years.",
 )
+
+cohort_choice = st.sidebar.selectbox("Age Cohort", list(COHORTS.keys()))
 
 if cohort_choice == "Custom range":
     col_a, col_b = st.sidebar.columns(2)
@@ -297,17 +306,23 @@ if cohort_choice == "Custom range":
 else:
     yob_range = COHORTS[cohort_choice]
 
-min_races = st.sidebar.slider("Minimum races", min_value=3, max_value=30, value=5)
+min_races = st.sidebar.slider("Min races (season)", min_value=1, max_value=20, value=3)
 
 country_search = st.sidebar.text_input(
     "Filter by country (e.g. USA, AUT)",
-    help="Leave blank to show all countries.",
 ).strip().upper()
 
 
 # ---------------------------------------------------------------------------
-# Apply filters
+# Load and filter data
 # ---------------------------------------------------------------------------
+
+with st.spinner("Loading athlete data..."):
+    df_all = load_recruiting_data(season_year)
+
+if df_all.empty:
+    st.error("No data available for this season.")
+    st.stop()
 
 df = df_all.copy()
 df = df[df["sex"] == gender_choice]
@@ -322,7 +337,7 @@ if race_types is not None:
 if yob_range is not None:
     df = df[df["yob"].between(yob_range[0], yob_range[1])]
 
-df = df[df["race_count"] >= min_races]
+df = df[df["season_races"] >= min_races]
 
 if country_search:
     df = df[df["country"].str.upper().str.contains(country_search, na=False)]
@@ -331,10 +346,9 @@ if df.empty:
     st.info("No athletes match the current filters. Try relaxing the requirements.")
     st.stop()
 
-# When "All" disciplines selected: keep the athlete's most-raced discipline row.
-# When a specific discipline is selected: all rows are already filtered.
+# When "All" disciplines: keep the athlete's most-raced discipline for that season
 if disc_choice == "All":
-    df = df.sort_values("race_count", ascending=False).drop_duplicates("fis_code").copy()
+    df = df.sort_values("season_races", ascending=False).drop_duplicates("fis_code").copy()
 
 
 # ---------------------------------------------------------------------------
@@ -351,17 +365,11 @@ df.index.name = "Rank"
 # Summary metrics row
 # ---------------------------------------------------------------------------
 
-n_athletes  = len(df)
-top_prospect = df.iloc[0]["name"] if n_athletes > 0 else "—"
-med_form     = df["mean_z"].median()
-med_cv       = df["cv_z"].median()
-med_dnf      = df["dnf_pct"].median()
-
 c1, c2, c3, c4 = st.columns(4)
-c1.metric("Athletes ranked", n_athletes)
-c2.metric("Median form (z)", f"{med_form:+.2f}")
-c3.metric("Median consistency (CV)", f"{med_cv:.2f}")
-c4.metric("Median DNF rate", f"{med_dnf:.1f}%")
+c1.metric("Athletes ranked", len(df))
+c2.metric("Median form (z)", f"{df['mean_z'].median():+.2f}")
+c3.metric("Median season FIS", f"{df['season_mean_fis'].median():.0f}")
+c4.metric("Median DNF rate", f"{df['dnf_pct'].median():.1f}%")
 
 st.divider()
 
@@ -370,87 +378,73 @@ st.divider()
 # Leaderboard table
 # ---------------------------------------------------------------------------
 
-st.subheader("Leaderboard")
+st.subheader(f"Leaderboard — {season_year} Season")
 
 def _weather_label(row) -> str:
     if pd.isna(row["weather_std"]) or pd.isna(row["weather_bin_count"]):
-        return "Limited data"
+        return "Limited"
     std = row["weather_std"]
-    if std < 0.20:
-        return "Excellent"
-    elif std < 0.35:
-        return "Good"
-    elif std < 0.55:
-        return "Moderate"
-    else:
-        return "Variable"
+    if std < 0.20:   return "Excellent"
+    elif std < 0.35: return "Good"
+    elif std < 0.55: return "Moderate"
+    else:            return "Variable"
 
-df["weather_versatility"] = df.apply(_weather_label, axis=1)
+df["all_conditions"] = df.apply(_weather_label, axis=1)
 
 display_cols = {
-    "name":               "Name",
-    "country":            "Country",
-    "yob":                "YOB",
-    "discipline":         "Discipline",
-    "race_count":         "Races",
-    "mean_z":             "Form (z)",
-    "score_form":         "Form Score",
-    "score_consistency":  "Consistency",
-    "score_reliability":  "Reliability",
-    "score_trajectory":   "Trajectory",
-    "weather_versatility":"All-Conditions",
-    "dnf_pct":            "DNF%",
-    "n_disciplines":      "Disciplines",
-    "scout_rating":       "Scout Rating",
+    "name":             "Name",
+    "country":          "Country",
+    "yob":              "YOB",
+    "discipline":       "Discipline",
+    "season_races":     "Season Races",
+    "career_races":     "Career Races",
+    "mean_z":           "Form (z)",
+    "season_mean_fis":  "Avg FIS",
+    "career_best_fis":  "Best FIS",
+    "score_form":       "Form Score",
+    "score_consistency":"Consistency",
+    "score_reliability":"Reliability",
+    "score_trajectory": "Trajectory",
+    "all_conditions":   "All-Conditions",
+    "n_disciplines":    "Events",
+    "scout_rating":     "Scout Rating",
 }
 
 table = df[list(display_cols.keys())].rename(columns=display_cols)
-table["YOB"]         = table["YOB"].astype("Int64")
-table["Disciplines"] = table["Disciplines"].astype("Int64")
+table["YOB"]          = table["YOB"].astype("Int64")
+table["Career Races"] = table["Career Races"].astype("Int64")
+table["Events"]       = table["Events"].astype("Int64")
 
 st.dataframe(
     table,
     use_container_width=True,
     column_config={
         "Scout Rating": st.column_config.ProgressColumn(
-            "Scout Rating",
-            format="%.1f",
-            min_value=0,
-            max_value=100,
+            "Scout Rating", format="%.1f", min_value=0, max_value=100,
         ),
         "Form Score": st.column_config.ProgressColumn(
-            "Form Score",
-            format="%.0f",
-            min_value=0,
-            max_value=100,
-            help="Percentile rank of field-normalised mean z-score within this cohort",
+            "Form Score", format="%.0f", min_value=0, max_value=100,
+            help="Percentile: field-normalised mean z-score within this cohort",
         ),
         "Consistency": st.column_config.ProgressColumn(
-            "Consistency",
-            format="%.0f",
-            min_value=0,
-            max_value=100,
-            help="Percentile rank of inverse CV — how reliably the athlete hits their level",
+            "Consistency", format="%.0f", min_value=0, max_value=100,
+            help="Percentile: inverse of z-score std — how reliably the athlete hits their level. An improving athlete may show moderate variance here — check Trajectory alongside.",
         ),
         "Reliability": st.column_config.ProgressColumn(
-            "Reliability",
-            format="%.0f",
-            min_value=0,
-            max_value=100,
-            help="Percentile rank of inverse DNF rate — finishes races",
+            "Reliability", format="%.0f", min_value=0, max_value=100,
+            help="Percentile: inverse DNF/DSQ/DNS rate — finishes races",
         ),
         "Trajectory": st.column_config.ProgressColumn(
-            "Trajectory",
-            format="%.0f",
-            min_value=0,
-            max_value=100,
-            help="Percentile rank of momentum z — currently improving vs declining",
+            "Trajectory", format="%.0f", min_value=0, max_value=100,
+            help="Percentile: momentum z — how the athlete's recent results compare to their career baseline",
         ),
-        "Form (z)":        st.column_config.NumberColumn("Form (z)",   format="%+.3f", help="Mean z-score vs field. 0 = field average; +0.5 = comfortably above average"),
-        "DNF%":            st.column_config.NumberColumn("DNF%",       format="%.1f%%"),
-        "All-Conditions":  st.column_config.TextColumn("All-Conditions", help="Consistency of performance across different weather conditions"),
-        "Races":           st.column_config.NumberColumn("Races"),
-        "Disciplines":     st.column_config.NumberColumn("Disciplines", help="Number of disciplines with ≥3 starts"),
+        "Form (z)":      st.column_config.NumberColumn("Form (z)",     format="%+.3f", help="Season mean z-score vs field. 0 = field avg; +0.5 = above average; +1.0 = top-tier"),
+        "Avg FIS":       st.column_config.NumberColumn("Avg FIS",      format="%.1f",  help="Season average FIS points — lower is faster"),
+        "Best FIS":      st.column_config.NumberColumn("Best FIS",     format="%.1f",  help="Career-best (lowest) FIS points"),
+        "Season Races":  st.column_config.NumberColumn("Season Races", help=f"Races in {season_year} season"),
+        "Career Races":  st.column_config.NumberColumn("Career Races", help="Total career races across all seasons"),
+        "All-Conditions":st.column_config.TextColumn("All-Conditions", help="Consistency across weather conditions (requires 3+ condition bins)"),
+        "Events":        st.column_config.NumberColumn("Events",       help="Number of disciplines with 3+ career starts"),
     },
     height=min(650, 55 + 35 * len(table)),
 )
@@ -467,35 +461,34 @@ with chart_col:
     st.subheader("Form vs Consistency")
     st.caption(
         "Top-right = fast and consistent (target zone). "
-        "Bubble size = race count. Color = Scout Rating."
+        "Bubble size = season race count. Color = Scout Rating."
     )
 
-    scatter_df = df.copy()
-    scatter_df["consistency_pct"] = scatter_df["score_consistency"]
-
     fig = px.scatter(
-        scatter_df,
+        df,
         x="mean_z",
         y="score_consistency",
-        size="race_count",
+        size="season_races",
         color="scout_rating",
         hover_name="name",
         hover_data={
-            "country":       True,
-            "yob":           True,
-            "race_count":    True,
-            "mean_z":        ":.3f",
-            "dnf_pct":       ":.1f",
-            "scout_rating":  ":.1f",
+            "country":          True,
+            "yob":              True,
+            "season_races":     True,
+            "mean_z":           ":.3f",
+            "season_mean_fis":  ":.1f",
+            "career_best_fis":  ":.1f",
+            "dnf_pct":          ":.1f",
+            "scout_rating":     ":.1f",
         },
         color_continuous_scale="RdYlGn",
         range_color=[0, 100],
         size_max=28,
         labels={
-            "mean_z":           "Form — Mean z-score vs field",
+            "mean_z":           "Form — Season mean z-score",
             "score_consistency":"Consistency Score (0–100)",
             "scout_rating":     "Scout Rating",
-            "race_count":       "Races",
+            "season_races":     "Season Races",
         },
         template="plotly_white",
     )
@@ -513,36 +506,32 @@ with chart_col:
 with radar_col:
     st.subheader("Athlete Spotlight")
 
-    athlete_names = df["name"].tolist()
     sel_name = st.selectbox(
         "Select athlete",
-        athlete_names,
+        df["name"].tolist(),
         index=0,
         label_visibility="collapsed",
     )
 
     sel = df[df["name"] == sel_name].iloc[0]
 
-    # Radar dimensions
     categories = ["Form", "Consistency", "Reliability", "Trajectory"]
-    values     = [
+    values = [
         float(sel["score_form"]),
         float(sel["score_consistency"]),
         float(sel["score_reliability"]),
         float(sel["score_trajectory"]),
     ]
-    # Close the polygon
-    categories_closed = categories + [categories[0]]
-    values_closed     = values + [values[0]]
+    cats_closed = categories + [categories[0]]
+    vals_closed = values + [values[0]]
 
     fig_r = go.Figure()
     fig_r.add_trace(go.Scatterpolar(
-        r     = values_closed,
-        theta = categories_closed,
-        fill  = "toself",
-        fillcolor = "rgba(26, 58, 107, 0.20)",
-        line  = dict(color="#1a3a6b", width=2),
-        name  = sel_name.split()[-1],
+        r=vals_closed, theta=cats_closed,
+        fill="toself",
+        fillcolor="rgba(26, 58, 107, 0.20)",
+        line=dict(color="#1a3a6b", width=2),
+        name=sel_name.split()[-1],
     ))
     fig_r.update_layout(
         polar=dict(
@@ -555,14 +544,21 @@ with radar_col:
             angularaxis=dict(tickfont=dict(size=13)),
         ),
         showlegend=False,
-        height=340,
-        margin=dict(l=40, r=40, t=30, b=30),
+        height=320,
+        margin=dict(l=40, r=40, t=30, b=20),
         paper_bgcolor="white",
     )
     st.plotly_chart(fig_r, use_container_width=True)
 
-    # Key stats below radar
     age = CURRENT_YEAR - int(sel["yob"]) if pd.notna(sel["yob"]) else "—"
+    traj_word = (
+        "Improving" if (sel.get("momentum_z") or 0) > 0.05
+        else "Declining" if (sel.get("momentum_z") or 0) < -0.05
+        else "Stable"
+    )
+    career_best = f"{sel['career_best_fis']:.1f}" if pd.notna(sel["career_best_fis"]) else "—"
+    career_races = int(sel["career_races"]) if pd.notna(sel["career_races"]) else int(sel["season_races"])
+
     st.markdown(f"""
 **{sel_name}**
 {sel.get('country','') or ''}  ·  Born {int(sel['yob']) if pd.notna(sel['yob']) else '—'} (age {age})  ·  {sel['discipline']}
@@ -570,13 +566,16 @@ with radar_col:
 | Metric | Value |
 |---|---|
 | Scout Rating | **{sel['scout_rating']:.1f}** / 100 |
-| Form (mean z) | **{sel['mean_z']:+.3f}** |
-| Consistency (CV) | **{sel['cv_z']:.3f}** |
-| DNF rate | **{sel['dnf_pct']:.1f}%** |
-| Trajectory | **{"Improving" if (sel['momentum_z'] or 0) > 0.05 else "Declining" if (sel['momentum_z'] or 0) < -0.05 else "Stable"}** |
-| All-conditions | **{sel['weather_versatility']}** |
-| Disciplines raced | **{int(sel['n_disciplines']) if pd.notna(sel['n_disciplines']) else 1}** |
-| Race count | **{int(sel['race_count'])}** |
+| Season form (z) | **{sel['mean_z']:+.3f}** |
+| Season avg FIS | **{sel['season_mean_fis']:.1f}** |
+| Career best FIS | **{career_best}** |
+| Consistency | **{sel['score_consistency']:.0f}** / 100 |
+| Reliability (DNF) | **{sel['dnf_pct']:.1f}%** |
+| Trajectory | **{traj_word}** |
+| All-conditions | **{sel['all_conditions']}** |
+| Season races | **{int(sel['season_races'])}** |
+| Career races | **{career_races}** |
+| Events competed | **{int(sel['n_disciplines']) if pd.notna(sel['n_disciplines']) else 1}** |
     """)
 
 
@@ -586,15 +585,16 @@ with radar_col:
 
 st.divider()
 csv_cols = [
-    "name", "country", "yob", "discipline", "race_type", "race_count",
-    "mean_z", "cv_z", "dnf_pct", "momentum_z",
+    "name", "country", "yob", "discipline", "race_type",
+    "season_races", "career_races", "mean_z", "std_z",
+    "season_mean_fis", "career_best_fis", "dnf_pct", "momentum_z",
     "score_form", "score_consistency", "score_reliability", "score_trajectory",
-    "weather_versatility", "n_disciplines", "scout_rating",
+    "all_conditions", "n_disciplines", "scout_rating",
 ]
-csv_out = df.reset_index()[csv_cols].to_csv(index=False)
+csv_out = df.reset_index()[[c for c in csv_cols if c in df.columns]].to_csv(index=False)
 st.download_button(
     "Download board as CSV",
     data=csv_out,
-    file_name=f"recruiting_board_{gender_choice.replace(' ','_')}_{disc_choice}.csv",
+    file_name=f"recruiting_{season_year}_{gender_choice.replace(' ','_')}_{disc_choice}.csv",
     mime="text/csv",
 )
