@@ -28,12 +28,6 @@ ROLLING_MONTHS = 18
 N_PEAK         = 5    # golf-handicap: avg of best N results in window
 N_STD          = 10   # consistency: std of best N results
 
-# FIS age group bands — percentile scoring is always within the selected group
-AGE_GROUPS = {
-    "U16 (born 2010+)":   (2010, 9999),
-    "U18 (born 2008–09)": (2008, 2009),
-    "U21 (born 2005–07)": (2005, 2007),
-}
 _ALL_MIN_YOB = 2005   # oldest eligible athlete for data load
 
 # Race difficulty weights (0–100) — used to credit athletes racing tougher fields
@@ -283,18 +277,6 @@ def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
     raw_traj               = _pct_rank(df["fis_trend"],  ascending=False)
     df["score_trajectory"] = raw_traj.clip(lower=50)
 
-    # Status label — tells scout whether athlete is climbing, topped out, etc.
-    def _status(row):
-        if row["peak_fis"] <= 20:
-            return "Elite"
-        if row["improvement_rate"] >= 2.0:
-            return "Climbing"
-        if row["improvement_rate"] <= -2.0:
-            return "Declining"
-        return "Stable"
-
-    df["status"] = df.apply(_status, axis=1)
-
     df["scout_rating"] = (
         W_PEAK       * df["score_peak"]
         + W_COMP_LEVEL * df["score_comp_level"]
@@ -361,10 +343,9 @@ if raw_df.empty:
 
 st.sidebar.header("Filters")
 
-gender_choice  = st.sidebar.radio("Gender", ["Men's", "Women's"], horizontal=True)
-disc_choice    = st.sidebar.selectbox("Discipline", DISCIPLINES, index=0)
-age_group_name = st.sidebar.radio("Age Group", list(AGE_GROUPS.keys()))
-level_choice   = st.sidebar.selectbox("Race Level", list(RACE_LEVEL_GROUPS.keys()))
+gender_choice = st.sidebar.radio("Gender", ["Men's", "Women's"], horizontal=True)
+disc_choice   = st.sidebar.selectbox("Discipline", DISCIPLINES, index=0)
+level_choice  = st.sidebar.selectbox("Race Level", list(RACE_LEVEL_GROUPS.keys()))
 
 # Race type and gender filters are applied to raw race rows before building
 # the athlete table — this controls which races feed into the metrics
@@ -385,13 +366,21 @@ if df_all.empty:
     st.info("No athletes with sufficient data match the current filters.")
     st.stop()
 
-# Filter to selected age group
-yob_min, yob_max = AGE_GROUPS[age_group_name]
-df_all = df_all[df_all["yob"].notna() & df_all["yob"].between(yob_min, yob_max)].copy()
+df_all = df_all[df_all["yob"].notna() & (df_all["yob"] >= _ALL_MIN_YOB)].copy()
 
 if df_all.empty:
-    st.info("No athletes in the selected age group.")
+    st.info("No athletes in the eligible age range.")
     st.stop()
+
+# Birth year filter
+available_yobs = sorted(df_all["yob"].dropna().astype(int).unique())
+if len(available_yobs) >= 2:
+    yob_min_sel, yob_max_sel = st.sidebar.select_slider(
+        "Birth Year", options=available_yobs,
+        value=(min(available_yobs), max(available_yobs)),
+    )
+else:
+    yob_min_sel = yob_max_sel = available_yobs[0]
 
 min_races      = st.sidebar.slider("Min races (rolling window)", min_value=1, max_value=20, value=5)
 country_search = st.sidebar.text_input("Filter by country (e.g. USA, AUT)").strip().upper()
@@ -399,7 +388,8 @@ country_search = st.sidebar.text_input("Filter by country (e.g. USA, AUT)").stri
 
 # ─── Apply remaining filters ──────────────────────────────────────────────────
 
-df = df_all[df_all["rolling_races"] >= min_races].copy()
+df = df_all[df_all["yob"].between(yob_min_sel, yob_max_sel)].copy()
+df = df[df["rolling_races"] >= min_races]
 if country_search:
     df = df[df["country"].str.upper().str.contains(country_search, na=False)]
 
@@ -410,7 +400,7 @@ if df.empty:
 # ─── Score and sort ───────────────────────────────────────────────────────────
 
 df = compute_scout_rating(df)
-df = df.sort_values("scout_rating", ascending=False).head(250).reset_index(drop=True)
+df = df.sort_values("scout_rating", ascending=False).head(100).reset_index(drop=True)
 df.index += 1
 df.index.name = "Rank"
 df["age"] = CURRENT_YEAR - df["yob"].astype(int)
@@ -425,7 +415,6 @@ display_cols = {
     "country":          "Country",
     "yob":              "YOB",
     "age":              "Age",
-    "status":           "Status",
     "rolling_races":    "Races (18mo)",
     "peak_fis":         "Peak FIS",
     "career_best_fis":  "Best Ever",
@@ -501,10 +490,6 @@ st.dataframe(
         "Best At":           st.column_config.TextColumn(
             "Best At",
             help="Highest competition level at which they scored their best FIS result in the window. WC / EC+ / Continental / FIS / Junior-Nat.",
-        ),
-        "Status":            st.column_config.TextColumn(
-            "Status",
-            help="Elite = peak FIS ≤ 20. Climbing = improving >2%/mo. Declining = worsening >2%/mo. Stable = otherwise.",
         ),
         "Races (18mo)":      st.column_config.NumberColumn(
             "Races (18mo)", help="Starts in the rolling 18-month window.",
@@ -608,7 +593,6 @@ with radar_col:
 | | |
 |---|---|
 | Scout Rating | **{sel['scout_rating']:.1f}** / 100 |
-| Status | **{sel.get('status','—')}** |
 | Peak FIS ({N_PEAK}-race avg) | **{sel['peak_fis']:.1f}** |
 | Best At | **{sel.get('best_level_label','—')}** ({sel.get('best_race_type','—')}) |
 | Avg FIS (rolling) | **{sel['rolling_mean_fis']:.1f}** |
@@ -622,88 +606,12 @@ with radar_col:
     """)
 
 
-# Row 2: Scout Rating breakdown — top 20
-st.divider()
-st.subheader("Scout Rating Breakdown — Top 20")
-st.caption("Weighted contribution of each component to the Scout Rating.")
-
-top20 = df.head(20).copy().sort_values("scout_rating", ascending=True)
-top20["contrib_peak"] = (W_PEAK        * top20["score_peak"]).round(1)
-top20["contrib_comp"] = (W_COMP_LEVEL  * top20["score_comp_level"]).round(1)
-top20["contrib_traj"] = (W_TRAJECTORY  * top20["score_trajectory"]).round(1)
-
-fig_b = go.Figure()
-for label, col, color in [
-    ("Peak Level",  "contrib_peak", "#1a3a6b"),
-    ("Comp. Level", "contrib_comp", "#2e6da4"),
-    ("Trajectory",  "contrib_traj", "#5ba3d0"),
-]:
-    fig_b.add_trace(go.Bar(
-        name=label, y=top20["name"], x=top20[col], orientation="h",
-        marker_color=color,
-        hovertemplate=f"<b>%{{y}}</b><br>{label}: %{{x:.1f}} pts<extra></extra>",
-    ))
-fig_b.update_layout(
-    barmode="stack",
-    xaxis=dict(title="Weighted contribution to Scout Rating (max 100)"),
-    yaxis=dict(title="", automargin=True),
-    height=max(350, 28 * len(top20)),
-    margin=dict(l=180, r=40, t=10, b=50),
-    legend=dict(orientation="h", yanchor="bottom", y=1.01, xanchor="left", x=0),
-    plot_bgcolor="white", paper_bgcolor="white",
-)
-fig_b.update_xaxes(showgrid=True, gridcolor="#eee", range=[0, 100])
-fig_b.update_yaxes(showgrid=False)
-st.plotly_chart(fig_b, use_container_width=True)
-
-
-# Row 3: Age vs Peak FIS
-st.divider()
-st.subheader("Age vs Peak Level")
-st.caption(
-    "Younger athletes with strong FIS points are the highest-upside prospects. "
-    "Y-axis inverted: lower FIS (better) appears higher."
-)
-fig_a = px.scatter(
-    df,
-    x="age",
-    y="peak_fis",
-    size="rolling_races",
-    color="scout_rating",
-    hover_name="name",
-    hover_data={
-        "country": True, "yob": True, "rolling_races": True,
-        "peak_fis": ":.1f", "career_best_fis": ":.1f",
-        "comp_level": ":.0f", "scout_rating": ":.1f",
-    },
-    color_continuous_scale="RdYlGn",
-    range_color=[0, 100],
-    size_max=24,
-    labels={
-        "age":         "Age",
-        "peak_fis":    "Peak FIS (lower = faster)",
-        "scout_rating":"Scout Rating",
-        "rolling_races":"Races (18mo)",
-    },
-    template="plotly_white",
-)
-fig_a.update_yaxes(autorange="reversed")
-fig_a.update_traces(marker_opacity=0.78)
-fig_a.update_layout(
-    height=360,
-    coloraxis_colorbar=dict(title="Scout Rating"),
-    margin=dict(l=50, r=20, t=10, b=50),
-    xaxis=dict(tickmode="linear", dtick=1),
-)
-st.plotly_chart(fig_a, use_container_width=True)
-
-
 # ─── Download ─────────────────────────────────────────────────────────────────
 
 st.divider()
 csv_cols = [
     "name", "country", "yob", "age", "discipline",
-    "status", "rolling_races", "career_races",
+    "rolling_races", "career_races",
     "peak_fis", "career_best_fis", "best_level_label", "best_race_type",
     "rolling_mean_fis", "hit_rate_pct",
     "improvement_rate", "comp_level", "dnf_pct",
