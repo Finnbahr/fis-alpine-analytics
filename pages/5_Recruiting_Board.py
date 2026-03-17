@@ -40,8 +40,8 @@ RACE_LEVEL_WEIGHT = {
     "FIS Junior World Ski Championships":  90,
     "European Cup":                        80,
     "European Cup Speed Event":            80,
-    "CIT":                                 75,
-    "CIT Arnold Lunn World Cup":           75,
+    "CIT":                                 50,
+    "CIT Arnold Lunn World Cup":           50,
     "Nor-Am Cup":                          65,
     "South American Cup":                  65,
     "Australian New Zealand Cup":          65,
@@ -61,11 +61,11 @@ RACE_LEVEL_GROUPS = {
     "All levels": None,
     "World Cup":       ["World Cup", "World Cup Speed Event", "Audi FIS Ski World Cup",
                         "Olympic Winter Games", "World Championships"],
-    "European Cup":    ["European Cup", "European Cup Speed Event",
-                        "CIT", "CIT Arnold Lunn World Cup"],
+    "European Cup":    ["European Cup", "European Cup Speed Event"],
     "Continental Cup": ["Nor-Am Cup", "South American Cup",
                         "Australian New Zealand Cup", "Far East Cup", "Asian Winter Games"],
     "FIS / Junior":    ["FIS", "FIS Junior World Ski Championships", "FIS Qualification",
+                        "CIT", "CIT Arnold Lunn World Cup",
                         "National Junior Championships", "National Junior Race",
                         "National Championships", "Entry League FIS"],
 }
@@ -190,6 +190,12 @@ def _group_metrics(g: pd.DataFrame) -> dict | None:
     # Ceiling hit rate — how close is their avg to their own peak?
     ceiling_ratio = round(peak_fis / mean_fis, 4) if mean_fis > 0 else 1.0
 
+    # Last 3 finished results, oldest → newest (chronological)
+    recent = finished.sort_values("date").tail(3)["fis_points"].tolist()
+    def _fmt(x):
+        return str(int(x)) if x == int(x) else f"{x:.1f}"
+    last_3_results = " · ".join(_fmt(x) for x in recent)
+
     # Highest competition level reached (in finished races within window)
     best_idx              = finished["fis_points"].idxmin()
     best_race_level_score = float(finished.loc[best_idx, "race_level_weight"])
@@ -218,6 +224,7 @@ def _group_metrics(g: pd.DataFrame) -> dict | None:
         "improvement_rate":    round(-fis_trend, 3),      # positive = improving (display)
         "comp_level":          round(comp_level, 1),
         "rolling_mean_fis":    round(mean_fis, 1),
+        "last_3_results":      last_3_results,
         "best_race_level":     best_race_level_score,
         "best_race_type":      best_race_type,
         "best_level_label":    best_level_label,
@@ -269,8 +276,10 @@ def compute_scout_rating(df: pd.DataFrame) -> pd.DataFrame:
     # 1. Level — lower FIS points = better. Dominant signal.
     df["score_peak"]       = _pct_rank(df["peak_fis"],   ascending=False)
 
-    # 2. Competition level — higher = racing tougher fields.
-    df["score_comp_level"] = _pct_rank(df["comp_level"], ascending=True)
+    # 2. Competition level — ranked on the level of their BEST result, not avg race level.
+    #    Answers: "have they proved they can score against tough fields?"
+    #    A 20 FIS at a WC beats a 20 FIS at a thin FIS race. avg comp_level kept as ref column.
+    df["score_comp_level"] = _pct_rank(df["best_race_level"], ascending=True)
 
     # 3. Trajectory — BONUS ONLY. Floor at 50 so declining athletes are neutral,
     #    not penalised. Elite athletes at ceiling legitimately have flat trends.
@@ -303,7 +312,7 @@ with st.expander("How Scout Rating is calculated", expanded=False):
 | Component | Weight | Method |
 |---|---|---|
 | **Peak Level** | {W_PEAK:.0%} | Average of your **best {N_PEAK} FIS results** in the last {ROLLING_MONTHS} months. Golf-handicap style — one hard race does not tank the score. Lower FIS = better. Absolute performance level is the dominant signal. |
-| **Competition Level** | {W_COMP_LEVEL:.0%} | Weighted avg of every race entered (WC=100, EC=80, Nor-Am/CIT=65, FIS=50, NJR=30). The same FIS points at a WC field mean more than at a thin NJR. Athletes who seek out tougher races get credit. |
+| **Competition Level** | {W_COMP_LEVEL:.0%} | Level of the race where they scored their **best FIS result** in the window (WC=100, EC=80, Nor-Am=65, FIS=50, NJR=30). Rewards athletes who proved they can score against hard fields — not just athletes who entered hard races. |
 | **Trajectory** | {W_TRAJECTORY:.0%} | FIS points slope as % of mean/month. **Bonus only — floor at neutral (50).** Athletes who have already arrived at ceiling are not penalised for a flat trend. Declining athletes get neutral, not negative. |
 
 **Hit Rate (`Peak FIS ÷ Avg FIS`) is shown as a reference column, not in the composite.** Ratio metrics have small-sample noise that corrupts rankings at junior pool sizes. Use it yourself as a "fat race" filter: peak=17, avg=17, hit=100% → consistently elite. Peak=30, avg=70, hit=43% → scrutinise before committing.
@@ -372,15 +381,9 @@ if df_all.empty:
     st.info("No athletes in the eligible age range.")
     st.stop()
 
-# Birth year filter
+# Birth year filter — single cohort at a time
 available_yobs = sorted(df_all["yob"].dropna().astype(int).unique())
-if len(available_yobs) >= 2:
-    yob_min_sel, yob_max_sel = st.sidebar.select_slider(
-        "Birth Year", options=available_yobs,
-        value=(min(available_yobs), max(available_yobs)),
-    )
-else:
-    yob_min_sel = yob_max_sel = available_yobs[0]
+yob_sel = st.sidebar.selectbox("Birth Year", options=available_yobs, index=0)
 
 min_races      = st.sidebar.slider("Min races (rolling window)", min_value=1, max_value=20, value=5)
 country_search = st.sidebar.text_input("Filter by country (e.g. USA, AUT)").strip().upper()
@@ -388,7 +391,7 @@ country_search = st.sidebar.text_input("Filter by country (e.g. USA, AUT)").stri
 
 # ─── Apply remaining filters ──────────────────────────────────────────────────
 
-df = df_all[df_all["yob"].between(yob_min_sel, yob_max_sel)].copy()
+df = df_all[df_all["yob"] == yob_sel].copy()
 df = df[df["rolling_races"] >= min_races]
 if country_search:
     df = df[df["country"].str.upper().str.contains(country_search, na=False)]
@@ -417,6 +420,7 @@ display_cols = {
     "age":              "Age",
     "rolling_races":    "Races (18mo)",
     "peak_fis":         "Peak FIS",
+    "last_3_results":   "Last 3",
     "career_best_fis":  "Best Ever",
     "best_level_label": "Best At",
     "rolling_mean_fis": "Avg FIS (rolling)",
@@ -452,7 +456,7 @@ st.dataframe(
         ),
         "Comp. Score": st.column_config.ProgressColumn(
             "Comp. Score", format="%.0f", min_value=0, max_value=100,
-            help="Percentile rank of avg competition level. 100 = consistently races toughest fields.",
+            help="Percentile rank of competition level at their best result. 100 = best result came against WC-level field.",
         ),
         "Trajectory": st.column_config.ProgressColumn(
             "Trajectory", format="%.0f", min_value=0, max_value=100,
@@ -465,6 +469,10 @@ st.dataframe(
         "Peak FIS":          st.column_config.NumberColumn(
             "Peak FIS", format="%.1f",
             help=f"Avg of best {N_PEAK} FIS points in the rolling {ROLLING_MONTHS}-month window. Lower = faster.",
+        ),
+        "Last 3":            st.column_config.TextColumn(
+            "Last 3",
+            help="Three most recent finished results (oldest → newest). Quick read on current form.",
         ),
         "Best Ever":         st.column_config.NumberColumn(
             "Best Ever", format="%.1f",
@@ -594,6 +602,7 @@ with radar_col:
 |---|---|
 | Scout Rating | **{sel['scout_rating']:.1f}** / 100 |
 | Peak FIS ({N_PEAK}-race avg) | **{sel['peak_fis']:.1f}** |
+| Last 3 Results | **{sel.get('last_3_results','—')}** |
 | Best At | **{sel.get('best_level_label','—')}** ({sel.get('best_race_type','—')}) |
 | Avg FIS (rolling) | **{sel['rolling_mean_fis']:.1f}** |
 | Ceiling Hit Rate | **{hit_rate}** |
@@ -612,7 +621,7 @@ st.divider()
 csv_cols = [
     "name", "country", "yob", "age", "discipline",
     "rolling_races", "career_races",
-    "peak_fis", "career_best_fis", "best_level_label", "best_race_type",
+    "peak_fis", "last_3_results", "career_best_fis", "best_level_label", "best_race_type",
     "rolling_mean_fis", "hit_rate_pct",
     "improvement_rate", "comp_level", "dnf_pct",
     "score_peak", "score_comp_level", "score_trajectory",
