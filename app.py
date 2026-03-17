@@ -18,5 +18,6 @@ pg = st.navigation([
     st.Page("pages/4_Race_Simulator.py",  title="Race Simulator"),
     st.Page("pages/5_Recruiting_Board.py", title="Recruiting Board"),
     st.Page("pages/6_XGBoost_Predictor.py", title="XGBoost Predictor"),
+    st.Page("pages/7_Training_Tracker.py",  title="Training Tracker"),
 ])
 pg.run()
